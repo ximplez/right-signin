@@ -1,0 +1,45 @@
+name: right-signin
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 16 * * *"
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TZ: Asia/Shanghai
+      COOKIES: ${{ secrets.COOKIES }}
+      FEISHU_BOT_URL: ${{ secrets.FEISHU_BOT_URL }}
+      GITHUB_TOKEN: ${{ secrets.RIGHT_SIGNIN_GITHUB_TOKEN }}
+      RIGHT_SIGNIN_GITHUB_REPO: ${{ github.repository }}
+      RIGHT_SIGNIN_GITHUB_SECRET_NAME: COOKIES
+      RIGHT_SIGNIN_NOTIFY_SUCCESS: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run right-signin
+        run: go run ./cmd/right-signin
+
+      - name: Upload runtime artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: right-signin-artifacts-${{ github.run_id }}
+          path: runtime/artifacts
+          if-no-files-found: ignore
+          retention-days: 7

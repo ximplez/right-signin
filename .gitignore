@@ -1,0 +1,5 @@
+runtime/profile/
+runtime/artifacts/
+runtime/cookies.json
+*.log
+.DS_Store
