@@ -1,5 +1,3 @@
-runtime/profile/
-runtime/artifacts/
-runtime/cookies.json
+runtime/
 *.log
 .DS_Store
