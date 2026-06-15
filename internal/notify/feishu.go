@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"right-signin/internal/httputil"
 )
 
 type FeishuNotifier struct {
@@ -20,7 +22,7 @@ func NewFeishu(webhook string) Notifier {
 	}
 	return &FeishuNotifier{
 		webhook: webhook,
-		client:  &http.Client{Timeout: 15 * time.Second},
+		client:  httputil.NewClient(15 * time.Second),
 	}
 }
 

@@ -25,12 +25,34 @@ type Session struct {
 	browserStop context.CancelFunc
 }
 
+type DOMRect struct {
+	X       float64 `json:"x"`
+	Y       float64 `json:"y"`
+	Width   float64 `json:"width"`
+	Height  float64 `json:"height"`
+	ScrollX float64 `json:"scrollX"`
+	ScrollY float64 `json:"scrollY"`
+	DPR     float64 `json:"dpr"`
+}
+
 func New(parent context.Context, cfg *config.Config) (*Session, error) {
+	headlessMode := any(false)
+	if !cfg.Debug {
+		headlessMode = "new"
+	}
 	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", !cfg.Debug),
+		chromedp.Flag("headless", headlessMode),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("no-sandbox", true),
 		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.Flag("disable-blink-features", "AutomationControlled"),
+		chromedp.Flag("enable-automation", false),
+		chromedp.Flag("useAutomationExtension", false),
+		chromedp.Flag("disable-background-timer-throttling", true),
+		chromedp.Flag("disable-backgrounding-occluded-windows", true),
+		chromedp.Flag("disable-renderer-backgrounding", true),
+		chromedp.Flag("password-store", "basic"),
+		chromedp.Flag("mute-audio", true),
 		chromedp.Flag("lang", cfg.BrowserLang),
 		chromedp.Flag("window-size", windowSize(cfg.WindowWidth, cfg.WindowHeight)),
 		chromedp.UserAgent(cfg.UserAgent),
@@ -132,6 +154,34 @@ func (s *Session) Attribute(selector, attr string) (string, error) {
 	})()`, strconv.Quote(selector), strconv.Quote(attr))
 	err := s.Run(chromedp.Evaluate(js, &value))
 	return strings.TrimSpace(value), err
+}
+
+func (s *Session) ElementRect(selector string) (DOMRect, error) {
+	var rect DOMRect
+	script := `(function(sel){
+		const el = document.querySelector(sel);
+		if (!el) return null;
+		const r = el.getBoundingClientRect();
+		return {
+			x: r.x,
+			y: r.y,
+			width: r.width,
+			height: r.height,
+			scrollX: window.scrollX || 0,
+			scrollY: window.scrollY || 0,
+			dpr: window.devicePixelRatio || 1,
+		};
+	})(` + strconv.Quote(selector) + `)`
+	if err := s.Run(chromedp.Evaluate(script, &rect)); err != nil {
+		return DOMRect{}, err
+	}
+	if rect.Width <= 0 || rect.Height <= 0 {
+		return DOMRect{}, fmt.Errorf("selector=%s 未命中有效元素区域", selector)
+	}
+	if rect.DPR <= 0 {
+		rect.DPR = 1
+	}
+	return rect, nil
 }
 
 func (s *Session) FindFirstLink(textHints, hrefHints []string) (string, error) {
@@ -244,18 +294,30 @@ func (s *Session) TextContainsAny(keywords []string) (bool, string, error) {
 }
 
 func (s *Session) FindCookieNames() ([]string, error) {
-	var names []string
-	ctx, cancel := context.WithTimeout(s.ctx, s.cfg.PageTimeout)
-	defer cancel()
-	cks, err := network.GetCookies().Do(ctx)
+	cks, err := s.FindCookies()
 	if err != nil {
 		return nil, err
 	}
+	var names []string
 	for _, ck := range cks {
 		names = append(names, ck.Name)
 	}
 	sort.Strings(names)
 	return names, nil
+}
+
+func (s *Session) FindCookies() ([]*network.Cookie, error) {
+	ctx, cancel := context.WithTimeout(s.ctx, s.cfg.PageTimeout)
+	defer cancel()
+	var cks []*network.Cookie
+	if err := chromedp.Run(ctx, chromedp.ActionFunc(func(runCtx context.Context) error {
+		var err error
+		cks, err = network.GetCookies().Do(runCtx)
+		return err
+	})); err != nil {
+		return nil, err
+	}
+	return cks, nil
 }
 
 func (s *Session) StorageKeys(kind string) ([]string, error) {

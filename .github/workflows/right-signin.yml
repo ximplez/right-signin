@@ -34,12 +34,3 @@ jobs:
 
       - name: Run right-signin
         run: go run ./cmd/right-signin
-
-      - name: Upload runtime artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: right-signin-artifacts-${{ github.run_id }}
-          path: runtime/artifacts
-          if-no-files-found: ignore
-          retention-days: 7

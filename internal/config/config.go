@@ -27,6 +27,9 @@ type Config struct {
 	DryRun              bool
 	NotifySuccess       bool
 	FeishuWebhook       string
+	OpenListBaseURL     string
+	OpenListToken       string
+	OpenListUploadDir   string
 	Timeout             time.Duration
 	PageTimeout         time.Duration
 	LoginWaitTimeout    time.Duration
@@ -65,8 +68,8 @@ func Load() (*Config, error) {
 	flag.DurationVar(&cfg.Timeout, "timeout", getenvDuration("RIGHT_SIGNIN_TIMEOUT", 8*time.Minute), "总超时时间")
 	flag.DurationVar(&cfg.PageTimeout, "page-timeout", getenvDuration("RIGHT_SIGNIN_PAGE_TIMEOUT", 25*time.Second), "页面加载超时时间")
 	flag.DurationVar(&cfg.LoginWaitTimeout, "login-timeout", getenvDuration("RIGHT_SIGNIN_LOGIN_TIMEOUT", 5*time.Minute), "登录等待超时时间")
-	flag.DurationVar(&cfg.LoginPollInterval, "login-poll", getenvDuration("RIGHT_SIGNIN_LOGIN_POLL", 2*time.Second), "登录轮询间隔")
-	flag.DurationVar(&cfg.QRCodeCheckInterval, "qr-check", getenvDuration("RIGHT_SIGNIN_QR_CHECK", 5*time.Second), "二维码过期检查间隔")
+	flag.DurationVar(&cfg.LoginPollInterval, "login-poll", getenvDuration("RIGHT_SIGNIN_LOGIN_POLL", 5*time.Second), "登录轮询间隔")
+	flag.DurationVar(&cfg.QRCodeCheckInterval, "qr-check", getenvDuration("RIGHT_SIGNIN_QR_CHECK", 15*time.Second), "二维码过期检查间隔")
 	flag.IntVar(&cfg.MaxQRRefresh, "qr-refresh-max", getenvInt("RIGHT_SIGNIN_QR_REFRESH_MAX", 6), "二维码最多刷新次数")
 	flag.IntVar(&cfg.NavigationRetries, "nav-retries", getenvInt("RIGHT_SIGNIN_NAV_RETRIES", 2), "页面导航重试次数")
 	flag.IntVar(&cfg.ActionRetries, "action-retries", getenvInt("RIGHT_SIGNIN_ACTION_RETRIES", 1), "关键动作重试次数")
@@ -84,6 +87,9 @@ func Load() (*Config, error) {
 	cfg.GitHubRepo = getenv("RIGHT_SIGNIN_GITHUB_REPO", getenv("GITHUB_REPOSITORY", ""))
 	cfg.GitHubSecretName = getenv("RIGHT_SIGNIN_GITHUB_SECRET_NAME", "COOKIES")
 	cfg.FeishuWebhook = strings.TrimSpace(os.Getenv("FEISHU_BOT_URL"))
+	cfg.OpenListBaseURL = strings.TrimRight(getenv("RIGHT_SIGNIN_OPENLIST_BASE_URL", "/"), "/")
+	cfg.OpenListToken = strings.TrimSpace(os.Getenv("RIGHT_SIGNIN_OPENLIST_TOKEN"))
+	cfg.OpenListUploadDir = ensureLeadingSlash(getenv("RIGHT_SIGNIN_OPENLIST_UPLOAD_DIR", "/right-signin"))
 	cfg.AppName = getenv("RIGHT_SIGNIN_APP_NAME", defaultAppName)
 	cfg.RunID = buildRunID()
 	cfg.RunArtifactDir = filepath.Join(cfg.ArtifactsRoot, cfg.RunID)
@@ -91,7 +97,7 @@ func Load() (*Config, error) {
 	if cfg.SignInURL == "" {
 		return nil, fmt.Errorf("sign-url 不能为空")
 	}
-	if cfg.Timeout <= 0 || cfg.PageTimeout <= 0 || cfg.LoginWaitTimeout <= 0 {
+	if cfg.Timeout <= 0 || cfg.PageTimeout <= 0 || cfg.LoginWaitTimeout <= 0 || cfg.LoginPollInterval <= 0 || cfg.QRCodeCheckInterval <= 0 {
 		return nil, fmt.Errorf("超时配置必须大于 0")
 	}
 	if cfg.MaxQRRefresh < 0 || cfg.NavigationRetries < 0 || cfg.ActionRetries < 0 {
@@ -109,6 +115,15 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func ensureLeadingSlash(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" || path == "/" {
+		return ""
+	}
+	path = "/" + strings.Trim(path, "/")
+	return path
 }
 
 func getenvBool(key string, fallback bool) bool {

@@ -19,6 +19,17 @@ func (s *Session) SaveScreenshot(path string) error {
 	return os.WriteFile(path, buf, 0o644)
 }
 
+func (s *Session) SaveElementScreenshot(selector, path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("创建元素截图目录失败: %w", err)
+	}
+	var buf []byte
+	if err := s.Run(chromedp.Screenshot(selector, &buf, chromedp.ByQuery)); err != nil {
+		return fmt.Errorf("元素截图失败 selector=%s: %w", selector, err)
+	}
+	return os.WriteFile(path, buf, 0o644)
+}
+
 func (s *Session) SaveHTML(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("创建 HTML 目录失败: %w", err)

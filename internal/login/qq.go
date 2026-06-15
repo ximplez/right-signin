@@ -2,80 +2,17 @@ package login
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"right-signin/internal/browser"
 	"right-signin/internal/classify"
-	"right-signin/internal/config"
 	"right-signin/internal/model"
-	"right-signin/internal/notify"
 )
 
-type Service struct {
-	cfg      *config.Config
-	notifier notify.Notifier
-}
-
-type QRCodeInfo struct {
-	Raw         string `json:"raw"`
-	Kind        string `json:"kind"`
-	PreviewURL  string `json:"preview_url"`
-	ImagePath   string `json:"image_path,omitempty"`
-	MetaPath    string `json:"meta_path,omitempty"`
-	PageShot    string `json:"page_shot,omitempty"`
-	CurrentURL  string `json:"current_url,omitempty"`
-	CurrentPage string `json:"current_page_title,omitempty"`
-}
-
-func New(cfg *config.Config, notifier notify.Notifier) *Service {
-	return &Service{cfg: cfg, notifier: notifier}
-}
-
-func (s *Service) IsLoggedIn(sess *browser.Session) (bool, string, error) {
-	summary := sess.Summary()
-	log.Printf("登录态检查摘要: url=%s title=%s cookies=%v localStorage=%v sessionStorage=%v body=%s", summary.URL, summary.Title, summary.CookieNames, summary.LocalStorageKeys, summary.SessionStoreKeys, summary.BodySnippet)
-	currentURL, err := sess.CurrentURL()
-	if err != nil {
-		return false, "", err
-	}
-	body, err := sess.BodyText()
-	if err != nil {
-		return false, "", err
-	}
-	status, reason := classify.DetectStatus(body)
-	if status == model.StatusNeedLogin {
-		return false, reason, nil
-	}
-	if strings.Contains(currentURL, "connect.php") || strings.Contains(currentURL, "ptlogin2") || strings.Contains(currentURL, "xui.ptlogin2") {
-		return false, "当前仍处于第三方登录流程", nil
-	}
-	if strings.Contains(body, "退出") || strings.Contains(body, "个人中心") || strings.Contains(body, "欢迎您回来") {
-		return true, "页面出现已登录特征", nil
-	}
-	if strings.Contains(currentURL, "right.com.cn") && !strings.Contains(body, "请先登录") && !strings.Contains(body, "立即登录") {
-		return true, "目标站点页面未出现登录提示", nil
-	}
-	names, err := sess.FindCookieNames()
-	if err == nil {
-		for _, name := range names {
-			if strings.Contains(strings.ToLower(name), "auth") || strings.Contains(strings.ToLower(name), "saltkey") || strings.Contains(strings.ToLower(name), "uid") {
-				return true, "检测到站点会话 cookie", nil
-			}
-		}
-	}
-	return false, "未发现可靠的已登录特征", nil
-}
-
-func (s *Service) EnsureLoggedIn(ctx context.Context, sess *browser.Session) (model.Result, error) {
+func (s *QQAuthenticator) EnsureLoggedIn(ctx context.Context, sess *browser.Session) (model.Result, error) {
 	loggedIn, reason, err := s.IsLoggedIn(sess)
 	if err != nil {
 		return model.Result{Status: model.StatusFailure, Message: "登录态检测失败"}, err
@@ -102,18 +39,12 @@ func (s *Service) EnsureLoggedIn(ctx context.Context, sess *browser.Session) (mo
 	log.Printf("已跳转 QQ 登录页: url=%s title=%s cookies=%v localStorage=%v sessionStorage=%v body=%s", qqSummary.URL, qqSummary.Title, qqSummary.CookieNames, qqSummary.LocalStorageKeys, qqSummary.SessionStoreKeys, qqSummary.BodySnippet)
 	if iframeSrc, err := sess.Attribute("#ptlogin_iframe", "src"); err == nil && iframeSrc != "" {
 		iframeURL := sess.ResolveURL(qqSummary.URL, iframeSrc)
-		log.Printf("发现 QQ 登录 iframe，准备直接进入 iframe 页面: %s", iframeURL)
-		if err := sess.Navigate(iframeURL); err != nil {
-			log.Printf("跳转 iframe 登录页失败，保留当前 graph.qq.com 页面继续尝试: %v", err)
-		} else {
-			iframeSummary := sess.Summary()
-			log.Printf("已进入 iframe 登录页: url=%s title=%s cookies=%v localStorage=%v sessionStorage=%v body=%s", iframeSummary.URL, iframeSummary.Title, iframeSummary.CookieNames, iframeSummary.LocalStorageKeys, iframeSummary.SessionStoreKeys, iframeSummary.BodySnippet)
-		}
+		log.Printf("发现 QQ 登录 iframe，保留父级 OAuth 页面，仅通过 iframe 源提取二维码: %s", iframeURL)
 	}
 	return s.waitForQRCodeAndLogin(ctx, sess, qqURL)
 }
 
-func (s *Service) openLoginEntry(sess *browser.Session) error {
+func (s *QQAuthenticator) openLoginEntry(sess *browser.Session) error {
 	_ = sess.SleepRandom(300*time.Millisecond, 800*time.Millisecond)
 	if err := sess.ClickFirstByText([]string{"立即登录", "登录"}); err != nil {
 		return err
@@ -121,7 +52,7 @@ func (s *Service) openLoginEntry(sess *browser.Session) error {
 	return sess.SleepRandom(800*time.Millisecond, 1400*time.Millisecond)
 }
 
-func (s *Service) resolveQQLoginURL(sess *browser.Session) (string, error) {
+func (s *QQAuthenticator) resolveQQLoginURL(sess *browser.Session) (string, error) {
 	currentURL, _ := sess.CurrentURL()
 	href, err := sess.FindFirstLink([]string{"QQ登录", "QQ 登录", "QQ"}, []string{"connect.php?mod=login", "qq.com"})
 	if err != nil {
@@ -139,13 +70,16 @@ func (s *Service) resolveQQLoginURL(sess *browser.Session) (string, error) {
 	return sess.ResolveURL(currentURL, href), nil
 }
 
-func (s *Service) waitForQRCodeAndLogin(ctx context.Context, sess *browser.Session, qqAuthURL string) (model.Result, error) {
-	qrInfo, err := s.fetchQRCode(sess, 0)
+func (s *QQAuthenticator) waitForQRCodeAndLogin(ctx context.Context, sess *browser.Session, qqAuthURL string) (model.Result, error) {
+	qrInfo, err := s.fetchQRCode(ctx, sess, 0)
 	if err != nil {
 		return model.Result{Status: model.StatusNeedLogin, Message: "未提取到登录二维码"}, err
 	}
 	refreshCount := 0
 	resumedAfterScan := false
+	maxRefreshCount := s.allowedQRRefreshCount()
+	lastProtocolSignature := ""
+	nextFallbackRefreshAt := time.Now().Add(s.cfg.QRCodeCheckInterval)
 	if err := s.sendQRCode(ctx, qrInfo, refreshCount); err != nil {
 		log.Printf("发送二维码通知失败: %v", err)
 	}
@@ -167,23 +101,77 @@ func (s *Service) waitForQRCodeAndLogin(ctx context.Context, sess *browser.Sessi
 		if risk, reason, err := s.detectRisk(sess); err == nil && risk {
 			return model.Result{Status: model.StatusRiskControl, Message: reason, QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseFile(qrInfo.ImagePath, qrInfo.PageShot), RefreshCount: refreshCount}, nil
 		}
-		invalid, reason, err := s.isQRCodeInvalid(sess)
-		if err != nil {
-			log.Printf("二维码失效检查失败: %v", err)
-		} else if invalid {
-			if refreshCount >= s.cfg.MaxQRRefresh {
-				return model.Result{Status: model.StatusQRCodeExpiredTooMany, Message: "二维码刷新次数超限: " + reason, QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseFile(qrInfo.ImagePath, qrInfo.PageShot), RefreshCount: refreshCount}, nil
+		protocolResult, protocolErr := s.pollQQQRCodeProtocol(ctx, sess, qrInfo)
+		if protocolErr != nil {
+			log.Printf("QQ 协议层轮询失败，将继续等待浏览器页内状态变化: %v", protocolErr)
+		} else {
+			nextFallbackRefreshAt = time.Now().Add(s.cfg.QRCodeCheckInterval)
+			stateSignature := protocolResult.Code + "|" + strings.TrimSpace(protocolResult.Message)
+			if stateSignature != lastProtocolSignature {
+				log.Printf("QQ 协议层状态更新: code=%s message=%s redirect=%s ptqrtoken=%d poll=%s", protocolResult.Code, protocolResult.Message, browser.NormalizeSnippet(protocolResult.RedirectURL, 200), protocolResult.PTQRToken, browser.NormalizeSnippet(protocolResult.PollURL, 220))
+				lastProtocolSignature = stateSignature
+			}
+			switch protocolResult.Code {
+			case "0":
+				log.Printf("QQ 协议层确认扫码授权完成，等待 OAuth 页面继续跳转")
+			case "66":
+				// 二维码仍有效，继续等待。
+			case "67":
+				log.Printf("QQ 协议层确认二维码已被扫码，等待手机确认授权")
+			case "65", "68":
+				if refreshCount >= maxRefreshCount {
+					return model.Result{Status: model.StatusQRCodeExpiredTooMany, Message: fmt.Sprintf("二维码协议层刷新次数超限: 已刷新 %d 次，最后状态=%s", refreshCount, protocolResult.Message), QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseFile(qrInfo.ImagePath, qrInfo.PageShot), RefreshCount: refreshCount}, nil
+				}
+				if err := s.refreshQRCode(sess); err != nil {
+					return model.Result{Status: model.StatusFailure, Message: "协议层检测到二维码失效后刷新失败", QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseFile(qrInfo.ImagePath, qrInfo.PageShot), RefreshCount: refreshCount}, err
+				}
+				refreshCount++
+				prevQRInfo := qrInfo
+				qrInfo, err = s.fetchQRCode(ctx, sess, refreshCount)
+				if err != nil {
+					return model.Result{Status: model.StatusFailure, Message: "协议层刷新后重新抓取二维码失败", RefreshCount: refreshCount}, err
+				}
+				lastProtocolSignature = ""
+				nextFallbackRefreshAt = time.Now().Add(s.cfg.QRCodeCheckInterval)
+				log.Printf("协议层检测到二维码已失效并完成刷新: refresh=%d old_code=%s kind=%s raw=%s image=%s meta=%s pageShot=%s", refreshCount, protocolResult.Code, qrInfo.Kind, browser.NormalizeSnippet(qrInfo.Raw, 180), qrInfo.ImagePath, qrInfo.MetaPath, qrInfo.PageShot)
+				if changed, reason := shouldNotifyQRCodeChange(prevQRInfo, qrInfo); changed {
+					if err := s.sendQRCode(ctx, qrInfo, refreshCount); err != nil {
+						log.Printf("发送二维码刷新通知失败: %v", err)
+					}
+					log.Printf("检测到二维码关键锚点变更，已发送刷新通知: refresh=%d reason=%s", refreshCount, reason)
+				} else {
+					log.Printf("协议层触发刷新后二维码关键锚点未变化，跳过刷新通知: refresh=%d reason=%s current=%s iframe=%s", refreshCount, reason, browser.NormalizeSnippet(qrInfo.CurrentURL, 180), browser.NormalizeSnippet(qrInfo.IframeURL, 180))
+				}
+			case "":
+				// 轮询返回为空时忽略。
+			default:
+				log.Printf("QQ 协议层返回未显式处理的状态，继续观察浏览器页内流程: code=%s message=%s raw=%s", protocolResult.Code, protocolResult.Message, browser.NormalizeSnippet(protocolResult.Raw, 220))
+			}
+		}
+		if protocolErr != nil && s.cfg.QRCodeCheckInterval > 0 && !time.Now().Before(nextFallbackRefreshAt) {
+			if refreshCount >= maxRefreshCount {
+				return model.Result{Status: model.StatusQRCodeExpiredTooMany, Message: fmt.Sprintf("二维码轮询异常且刷新次数超限: 已刷新 %d 次", refreshCount), QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseFile(qrInfo.ImagePath, qrInfo.PageShot), RefreshCount: refreshCount}, nil
 			}
 			if err := s.refreshQRCode(sess); err != nil {
-				return model.Result{Status: model.StatusFailure, Message: "刷新二维码失败", QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseFile(qrInfo.ImagePath, qrInfo.PageShot), RefreshCount: refreshCount}, err
+				return model.Result{Status: model.StatusFailure, Message: "协议层轮询异常后的兜底刷新失败", QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseFile(qrInfo.ImagePath, qrInfo.PageShot), RefreshCount: refreshCount}, err
 			}
 			refreshCount++
-			qrInfo, err = s.fetchQRCode(sess, refreshCount)
+			prevQRInfo := qrInfo
+			qrInfo, err = s.fetchQRCode(ctx, sess, refreshCount)
 			if err != nil {
-				return model.Result{Status: model.StatusFailure, Message: "刷新后重新抓取二维码失败", RefreshCount: refreshCount}, err
+				return model.Result{Status: model.StatusFailure, Message: "协议层轮询异常后的兜底刷新重新抓取二维码失败", RefreshCount: refreshCount}, err
 			}
-			log.Printf("二维码刷新成功: kind=%s raw=%s image=%s meta=%s pageShot=%s", qrInfo.Kind, browser.NormalizeSnippet(qrInfo.Raw, 180), qrInfo.ImagePath, qrInfo.MetaPath, qrInfo.PageShot)
-			_ = s.sendQRCode(ctx, qrInfo, refreshCount)
+			lastProtocolSignature = ""
+			nextFallbackRefreshAt = time.Now().Add(s.cfg.QRCodeCheckInterval)
+			log.Printf("协议层轮询异常后已执行兜底刷新: refresh=%d kind=%s raw=%s image=%s meta=%s pageShot=%s", refreshCount, qrInfo.Kind, browser.NormalizeSnippet(qrInfo.Raw, 180), qrInfo.ImagePath, qrInfo.MetaPath, qrInfo.PageShot)
+			if changed, reason := shouldNotifyQRCodeChange(prevQRInfo, qrInfo); changed {
+				if err := s.sendQRCode(ctx, qrInfo, refreshCount); err != nil {
+					log.Printf("发送二维码刷新通知失败: %v", err)
+				}
+				log.Printf("检测到二维码关键锚点变更，已发送刷新通知: refresh=%d reason=%s", refreshCount, reason)
+			} else {
+				log.Printf("二维码关键锚点未变化，跳过刷新通知: refresh=%d reason=%s current=%s iframe=%s", refreshCount, reason, browser.NormalizeSnippet(qrInfo.CurrentURL, 180), browser.NormalizeSnippet(qrInfo.IframeURL, 180))
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -194,7 +182,7 @@ func (s *Service) waitForQRCodeAndLogin(ctx context.Context, sess *browser.Sessi
 	return model.Result{Status: model.StatusLoginTimeout, Message: "等待扫码登录超时", QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseFile(qrInfo.ImagePath, qrInfo.PageShot), RefreshCount: refreshCount}, nil
 }
 
-func (s *Service) resumeQQOAuthIfNeeded(sess *browser.Session, qqAuthURL string, resumedAfterScan bool) (bool, error) {
+func (s *QQAuthenticator) resumeQQOAuthIfNeeded(sess *browser.Session, qqAuthURL string, resumedAfterScan bool) (bool, error) {
 	currentURL, err := sess.CurrentURL()
 	if err != nil {
 		return false, err
@@ -233,7 +221,7 @@ func (s *Service) resumeQQOAuthIfNeeded(sess *browser.Session, qqAuthURL string,
 	return true, nil
 }
 
-func (s *Service) clickAuthorizeIfPresent(sess *browser.Session) error {
+func (s *QQAuthenticator) clickAuthorizeIfPresent(sess *browser.Session) error {
 	body, err := sess.BodyText()
 	if err != nil {
 		return err
@@ -251,67 +239,7 @@ func (s *Service) clickAuthorizeIfPresent(sess *browser.Session) error {
 	return nil
 }
 
-func (s *Service) fetchQRCode(sess *browser.Session, refreshCount int) (QRCodeInfo, error) {
-	if err := sess.SleepRandom(500*time.Millisecond, 1200*time.Millisecond); err != nil {
-		return QRCodeInfo{}, err
-	}
-	raw, err := sess.FindImageSrcByKeywords([]string{"ptqrshow", "qrcode", "qrshow", "qr"})
-	if err != nil {
-		return QRCodeInfo{}, err
-	}
-	currentURL, _ := sess.CurrentURL()
-	title, _ := sess.Title()
-	info := QRCodeInfo{Raw: raw, Kind: detectQRCodeKind(raw), CurrentURL: currentURL, CurrentPage: title}
-	info.PreviewURL = s.buildPreviewURL(raw, info.Kind)
-	pageShot, imagePath, metaPath, err := s.persistQRCodeArtifacts(sess, info, refreshCount)
-	if err != nil {
-		log.Printf("保存二维码产物失败: %v", err)
-	}
-	info.PageShot = pageShot
-	info.ImagePath = imagePath
-	info.MetaPath = metaPath
-	return info, nil
-}
-
-func (s *Service) sendQRCode(ctx context.Context, qrInfo QRCodeInfo, refreshCount int) error {
-	if qrInfo.Raw == "" && qrInfo.PageShot == "" {
-		return nil
-	}
-	targetURL := qrInfo.PreviewURL
-	if targetURL == "" {
-		targetURL = qrInfo.CurrentURL
-	}
-	msg := notify.Message{
-		App:       s.cfg.AppName,
-		Title:     "需要 QQ 扫码登录",
-		Msg:       fmt.Sprintf("运行ID: %s\n阶段: 登录\n二维码刷新次数: %d\n二维码类型: %s\n二维码文件: %s\n页面截图: %s\n请尽快扫码，如二维码失效会再次通知。", s.cfg.RunID, refreshCount, qrInfo.Kind, qrInfo.ImagePath, qrInfo.PageShot),
-		TargetURL: targetURL,
-	}
-	return s.notifier.Notify(ctx, msg)
-}
-
-func (s *Service) isQRCodeInvalid(sess *browser.Session) (bool, string, error) {
-	body, err := sess.BodyText()
-	if err != nil {
-		return false, "", err
-	}
-	for _, kw := range []string{"二维码已失效", "点击刷新", "登录超时", "请点击刷新"} {
-		if strings.Contains(body, kw) {
-			return true, "命中关键词: " + kw, nil
-		}
-	}
-	return false, "", nil
-}
-
-func (s *Service) refreshQRCode(sess *browser.Session) error {
-	log.Printf("检测到二维码失效，尝试刷新")
-	if err := sess.ClickFirstByText([]string{"点击刷新", "刷新二维码", "重新加载", "重试"}); err != nil {
-		return err
-	}
-	return sess.SleepRandom(900*time.Millisecond, 1600*time.Millisecond)
-}
-
-func (s *Service) detectRisk(sess *browser.Session) (bool, string, error) {
+func (s *QQAuthenticator) detectRisk(sess *browser.Session) (bool, string, error) {
 	body, err := sess.BodyText()
 	if err != nil {
 		return false, "", err
@@ -322,121 +250,17 @@ func (s *Service) detectRisk(sess *browser.Session) (bool, string, error) {
 	return false, "", nil
 }
 
-func ArtifactBase(artifactDir, prefix string) string {
-	return filepath.Join(artifactDir, prefix+"-login")
-}
-
-func detectQRCodeKind(raw string) string {
-	raw = strings.TrimSpace(raw)
-	switch {
-	case raw == "":
-		return "empty"
-	case strings.HasPrefix(raw, "data:image/"):
-		return "data-url-image"
-	case strings.HasPrefix(raw, "blob:"):
-		return "blob-url"
-	case strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://"):
-		return "remote-image-url"
-	default:
-		return "unknown"
+func (s *QQAuthenticator) allowedQRRefreshCount() int {
+	maxRefreshCount := s.cfg.MaxQRRefresh
+	if s.cfg.LoginWaitTimeout <= 0 || s.cfg.QRCodeCheckInterval <= 0 {
+		return maxRefreshCount
 	}
-}
-
-func (s *Service) buildPreviewURL(raw, kind string) string {
-	raw = strings.TrimSpace(raw)
-	switch kind {
-	case "data-url-image":
-		return "https://ximplez.github.io/base64-image-viewer/?target=" + raw
-	case "remote-image-url":
-		return raw
-	default:
-		return ""
+	needed := int(s.cfg.LoginWaitTimeout / s.cfg.QRCodeCheckInterval)
+	if s.cfg.LoginWaitTimeout%s.cfg.QRCodeCheckInterval != 0 {
+		needed++
 	}
-}
-
-func (s *Service) persistQRCodeArtifacts(sess *browser.Session, info QRCodeInfo, refreshCount int) (pageShot string, imagePath string, metaPath string, err error) {
-	baseName := filepath.Join(s.cfg.RunArtifactDir, fmt.Sprintf("qrcode-%02d", refreshCount))
-	pageShot = baseName + "-page.png"
-	if err = sess.SaveScreenshot(pageShot); err != nil {
-		return pageShot, "", "", err
+	if needed > maxRefreshCount {
+		return needed
 	}
-	if strings.HasPrefix(info.Raw, "data:image/") {
-		imagePath = baseName + imageExtFromDataURL(info.Raw)
-		if err = writeDataURLImage(info.Raw, imagePath); err != nil {
-			log.Printf("写入 data URL 二维码图片失败: %v", err)
-			imagePath = ""
-		}
-	} else if strings.HasPrefix(info.Raw, "http://") || strings.HasPrefix(info.Raw, "https://") {
-		imagePath = baseName + imageExtFromRemoteURL(info.Raw)
-		if err = downloadRemoteImage(info.Raw, imagePath); err != nil {
-			log.Printf("下载二维码远程图片失败: %v", err)
-			imagePath = ""
-		}
-	}
-	metaPath = baseName + ".json"
-	metaBytes, _ := json.MarshalIndent(info, "", "  ")
-	if writeErr := os.WriteFile(metaPath, metaBytes, 0o644); writeErr != nil {
-		return pageShot, imagePath, metaPath, writeErr
-	}
-	return pageShot, imagePath, metaPath, nil
-}
-
-func writeDataURLImage(raw, path string) error {
-	idx := strings.Index(raw, ",")
-	if idx <= 0 {
-		return fmt.Errorf("非法 data url")
-	}
-	payload := raw[idx+1:]
-	data, err := base64.StdEncoding.DecodeString(payload)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
-}
-
-func imageExtFromDataURL(raw string) string {
-	switch {
-	case strings.HasPrefix(raw, "data:image/jpeg"):
-		return ".jpg"
-	case strings.HasPrefix(raw, "data:image/webp"):
-		return ".webp"
-	case strings.HasPrefix(raw, "data:image/gif"):
-		return ".gif"
-	default:
-		return ".png"
-	}
-}
-
-func imageExtFromRemoteURL(raw string) string {
-	lower := strings.ToLower(raw)
-	for _, ext := range []string{".png", ".jpg", ".jpeg", ".gif", ".webp"} {
-		if strings.Contains(lower, ext) {
-			return ext
-		}
-	}
-	return ".png"
-}
-
-func downloadRemoteImage(raw, path string) error {
-	client := &http.Client{Timeout: 20 * time.Second}
-	resp, err := client.Get(raw)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("下载二维码图片失败，状态码=%d", resp.StatusCode)
-	}
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
-}
-
-func chooseFile(v1, v2 string) string {
-	if v1 != "" {
-		return v1
-	}
-	return v2
+	return maxRefreshCount
 }

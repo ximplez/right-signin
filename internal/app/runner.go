@@ -20,11 +20,11 @@ import (
 )
 
 type Runner struct {
-	cfg       *config.Config
-	notifier  notify.Notifier
-	store     session.Store
-	loginSvc  *login.Service
-	signinSvc *signin.Service
+	cfg          *config.Config
+	notifier     notify.Notifier
+	store        session.Store
+	authProvider login.Provider
+	signinSvc    *signin.Service
 }
 
 func NewRunner(cfg *config.Config) (*Runner, error) {
@@ -44,11 +44,11 @@ func NewRunner(cfg *config.Config) (*Runner, error) {
 	}
 	notifier := notify.NewFeishu(cfg.FeishuWebhook)
 	return &Runner{
-		cfg:       cfg,
-		notifier:  notifier,
-		store:     store,
-		loginSvc:  login.New(cfg, notifier),
-		signinSvc: signin.New(cfg),
+		cfg:          cfg,
+		notifier:     notifier,
+		store:        store,
+		authProvider: login.New(cfg, notifier),
+		signinSvc:    signin.New(cfg),
 	}, nil
 }
 
@@ -74,6 +74,9 @@ func (r *Runner) Run(parent context.Context) error {
 	finalResult := model.Result{Status: model.StatusUnknown, ArtifactDir: r.cfg.RunArtifactDir}
 	defer func() {
 		persistCookies("run-defer")
+		if err := r.authProvider.Cleanup(context.Background()); err != nil {
+			log.Printf("清空 OpenList 上传目录失败: %v", err)
+		}
 		finalResult.Duration = time.Since(start)
 	}()
 
@@ -98,7 +101,7 @@ func (r *Runner) Run(parent context.Context) error {
 		return err
 	}
 	if inspect.Status == model.StatusNeedLogin {
-		loginResult, err := r.loginSvc.EnsureLoggedIn(ctx, sess)
+		loginResult, err := r.authProvider.EnsureLoggedIn(ctx, sess)
 		finalResult = loginResult
 		if err != nil {
 			_ = r.captureAndNotify(ctx, sess, &finalResult, "login-failed")
@@ -165,14 +168,9 @@ func (r *Runner) captureAndNotify(ctx context.Context, sess *browser.Session, re
 			"阶段: " + prefix,
 			"状态: " + string(result.Status),
 			"原因: " + result.Message,
-			"当前URL: " + result.URL,
 			optionalLine("二维码类型", result.QRCodeKind),
-			optionalLine("二维码", result.QRCodeURL),
-			optionalLine("二维码文件", result.QRCodeFilePath),
-			optionalLine("截图", result.ScreenshotPath),
-			optionalLine("HTML", result.HTMLPath),
+			optionalLine("二维码刷新次数", fmt.Sprintf("%d", result.RefreshCount)),
 		}, "\n"),
-		TargetURL: chooseTarget(result.QRCodeURL, result.URL),
 	}
 	return r.notifier.Notify(ctx, msg)
 }
