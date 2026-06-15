@@ -35,6 +35,19 @@ type DOMRect struct {
 	DPR     float64 `json:"dpr"`
 }
 
+type ElementState struct {
+	Selector     string `json:"selector"`
+	Exists       bool   `json:"exists"`
+	Visible      bool   `json:"visible"`
+	Text         string `json:"text,omitempty"`
+	Class        string `json:"class,omitempty"`
+	ID           string `json:"id,omitempty"`
+	Name         string `json:"name,omitempty"`
+	Href         string `json:"href,omitempty"`
+	Disabled     bool   `json:"disabled,omitempty"`
+	AriaDisabled string `json:"aria_disabled,omitempty"`
+}
+
 func New(parent context.Context, cfg *config.Config) (*Session, error) {
 	headlessMode := any(false)
 	if !cfg.Debug {
@@ -154,6 +167,41 @@ func (s *Session) Attribute(selector, attr string) (string, error) {
 	})()`, strconv.Quote(selector), strconv.Quote(attr))
 	err := s.Run(chromedp.Evaluate(js, &value))
 	return strings.TrimSpace(value), err
+}
+
+func (s *Session) ElementState(selector string) (ElementState, error) {
+	state := ElementState{Selector: selector}
+	js := fmt.Sprintf(`(() => {
+		const el = document.querySelector(%s);
+		if (!el) {
+			return { selector: %s, exists: false, visible: false };
+		}
+		const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+		const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
+		const text = ((el.innerText || el.textContent || el.value || '') + '').replace(/\s+/g, ' ').trim();
+		return {
+			selector: %s,
+			exists: true,
+			visible: !(el.hidden || (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0'))) && rect.width > 0 && rect.height > 0,
+			text,
+			class: (el.getAttribute('class') || '').trim(),
+			id: (el.id || '').trim(),
+			name: (el.getAttribute('name') || '').trim(),
+			href: (el.getAttribute('href') || el.href || '').trim(),
+			disabled: Boolean(el.disabled || el.getAttribute('disabled') !== null),
+			aria_disabled: (el.getAttribute('aria-disabled') || '').trim(),
+		};
+	})()`, strconv.Quote(selector), strconv.Quote(selector), strconv.Quote(selector))
+	if err := s.Run(chromedp.Evaluate(js, &state)); err != nil {
+		return ElementState{}, err
+	}
+	state.Text = strings.TrimSpace(state.Text)
+	state.Class = strings.TrimSpace(state.Class)
+	state.ID = strings.TrimSpace(state.ID)
+	state.Name = strings.TrimSpace(state.Name)
+	state.Href = strings.TrimSpace(state.Href)
+	state.AriaDisabled = strings.TrimSpace(state.AriaDisabled)
+	return state, nil
 }
 
 func (s *Session) ElementRect(selector string) (DOMRect, error) {

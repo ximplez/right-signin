@@ -25,10 +25,20 @@ const (
 )
 
 var (
-	signNavLinkPattern  = regexp.MustCompile(`(?is)<a\b[^>]*href=["'][^"']*erling_qd-sign_in\.html[^"']*["'][^>]*>(.*?)</a>`)
-	signButtonPattern   = regexp.MustCompile(`(?is)<button\b([^>]*)>(.*?)</button>`)
-	tagPattern          = regexp.MustCompile(`<[^>]+>`)
+	signNavLinkPattern = regexp.MustCompile(`(?is)<a\b[^>]*href=["'][^"']*erling_qd-sign_in\.html[^"']*["'][^>]*>(.*?)</a>`)
+	signButtonPattern  = regexp.MustCompile(`(?is)<button\b([^>]*)>(.*?)</button>`)
+	tagPattern         = regexp.MustCompile(`<[^>]+>`)
+	signStateSelectors = []string{
+		"a[href*='erling_qd-sign_in.html']",
+		"#signin-btn",
+		"#signin-checkin-btn",
+		"button.erqd-checkin-btn",
+		"button.erqd-checkin-btn2",
+		"button[id*='signin'][class*='checkin']",
+		"button[id*='signin']",
+	}
 	signButtonSelectors = []string{
+		"a[href*='erling_qd-sign_in.html']",
 		"#signin-btn",
 		"#signin-checkin-btn",
 		"button.erqd-checkin-btn",
@@ -43,12 +53,20 @@ func New(cfg *config.Config) *Service {
 }
 
 func (s *Service) Inspect(sess *browser.Session) (model.Result, error) {
+	currentURL, _ := sess.CurrentURL()
+	if states, result, err := s.waitForSignPageStable(sess, 6*time.Second); err == nil {
+		if result.Status != model.StatusUnknown {
+			result.URL = currentURL
+			return result, nil
+		}
+		_ = states
+	}
+
 	body, err := sess.BodyText()
 	if err != nil {
 		return model.Result{Status: model.StatusNetworkError, Message: "读取页面文本失败"}, err
 	}
 	status, reason := classify.DetectStatus(body)
-	currentURL, _ := sess.CurrentURL()
 	if status == model.StatusRiskControl || status == model.StatusNetworkError || status == model.StatusNeedLogin {
 		return model.Result{Status: status, Message: reason, URL: currentURL}, nil
 	}
@@ -68,6 +86,11 @@ func (s *Service) Inspect(sess *browser.Session) (model.Result, error) {
 			return model.Result{Status: model.StatusReadyToSign, Message: anchorReason, URL: currentURL}, nil
 		}
 	}
+	if states, err := s.querySignElementStates(sess); err == nil {
+		if status, reason, ok := classifySignElementStates(states); ok {
+			return model.Result{Status: status, Message: reason, URL: currentURL}, nil
+		}
+	}
 	if status == model.StatusUnknown {
 		ready, err := s.hasSignButton(sess)
 		if err == nil && ready {
@@ -76,6 +99,103 @@ func (s *Service) Inspect(sess *browser.Session) (model.Result, error) {
 		return model.Result{Status: model.StatusPageChanged, Message: "未识别到签到状态: " + reason, URL: currentURL}, nil
 	}
 	return model.Result{Status: status, Message: reason, URL: currentURL}, nil
+}
+
+func (s *Service) waitForSignPageStable(sess *browser.Session, timeout time.Duration) ([]browser.ElementState, model.Result, error) {
+	if timeout <= 0 {
+		states, err := s.querySignElementStates(sess)
+		return states, model.Result{Status: model.StatusUnknown, Message: "未启用签到页稳定等待"}, err
+	}
+	deadline := time.Now().Add(timeout)
+	var lastStates []browser.ElementState
+	var lastResult model.Result
+	for {
+		states, result, err := s.inspectSignIndicators(sess)
+		if err == nil {
+			lastStates = states
+			lastResult = result
+			if result.Status != model.StatusUnknown {
+				return states, result, nil
+			}
+		}
+		if !time.Now().Before(deadline) {
+			if err != nil {
+				return lastStates, lastResult, err
+			}
+			return lastStates, lastResult, nil
+		}
+		_ = sess.SleepRandom(400*time.Millisecond, 900*time.Millisecond)
+	}
+}
+
+func (s *Service) inspectSignIndicators(sess *browser.Session) ([]browser.ElementState, model.Result, error) {
+	currentURL, _ := sess.CurrentURL()
+	body, err := sess.BodyText()
+	if err != nil {
+		return nil, model.Result{Status: model.StatusNetworkError, Message: "读取页面文本失败", URL: currentURL}, err
+	}
+	status, reason := classify.DetectStatus(body)
+	if status == model.StatusRiskControl || status == model.StatusNetworkError || status == model.StatusNeedLogin {
+		return nil, model.Result{Status: status, Message: reason, URL: currentURL}, nil
+	}
+	if status == model.StatusSuccess {
+		return nil, model.Result{Status: model.StatusAlreadySigned, Message: reason, URL: currentURL}, nil
+	}
+	if status == model.StatusFailure {
+		return nil, model.Result{Status: status, Message: reason, URL: currentURL}, nil
+	}
+	states, err := s.querySignElementStates(sess)
+	if err == nil {
+		if signStatus, signReason, ok := classifySignElementStates(states); ok {
+			return states, model.Result{Status: signStatus, Message: signReason, URL: currentURL}, nil
+		}
+	}
+	if html, htmlErr := sess.HTML(); htmlErr == nil {
+		anchorStatus, anchorReason := detectSignPageAnchors(html)
+		switch anchorStatus {
+		case signAnchorAlreadySigned:
+			return states, model.Result{Status: model.StatusAlreadySigned, Message: anchorReason, URL: currentURL}, nil
+		case signAnchorReadyToSign:
+			return states, model.Result{Status: model.StatusReadyToSign, Message: anchorReason, URL: currentURL}, nil
+		}
+	}
+	return states, model.Result{Status: model.StatusUnknown, Message: "等待签到模块稳定中", URL: currentURL}, nil
+}
+
+func (s *Service) querySignElementStates(sess *browser.Session) ([]browser.ElementState, error) {
+	states := make([]browser.ElementState, 0, len(signStateSelectors))
+	for _, selector := range signStateSelectors {
+		state, err := sess.ElementState(selector)
+		if err != nil {
+			return nil, err
+		}
+		states = append(states, state)
+	}
+	return states, nil
+}
+
+func classifySignElementStates(states []browser.ElementState) (model.Status, string, bool) {
+	for _, state := range states {
+		if !state.Exists || !state.Visible {
+			continue
+		}
+		text := normalizeAnchorText(state.Text)
+		attrs := strings.ToLower(strings.Join([]string{state.Class, state.ID, state.Name, state.Href}, " "))
+		isCheckinElement := strings.Contains(attrs, "signin") || strings.Contains(attrs, "checkin") || strings.Contains(attrs, "erling_qd-sign_in.html")
+		if !isCheckinElement {
+			continue
+		}
+		if text == "已签到" || strings.Contains(text, "今日已签到") || strings.Contains(attrs, "erqd-checkin-btn2") || state.Disabled || strings.EqualFold(state.AriaDisabled, "true") {
+			return model.StatusAlreadySigned, fmt.Sprintf("命中元素强锚点: selector=%s text=%s disabled=%t class=%s", state.Selector, text, state.Disabled || strings.EqualFold(state.AriaDisabled, "true"), strings.TrimSpace(state.Class)), true
+		}
+		if text == "立即签到" || text == "签到" || strings.Contains(text, "签到") {
+			return model.StatusReadyToSign, fmt.Sprintf("命中元素强锚点: selector=%s text=%s class=%s", state.Selector, text, strings.TrimSpace(state.Class)), true
+		}
+		if strings.Contains(attrs, "erqd-checkin-btn") || strings.Contains(attrs, "signin-btn") {
+			return model.StatusReadyToSign, fmt.Sprintf("命中元素强锚点: selector=%s class=%s", state.Selector, strings.TrimSpace(state.Class)), true
+		}
+	}
+	return model.StatusUnknown, "未命中元素强锚点", false
 }
 
 func detectSignPageAnchors(html string) (signPageAnchorStatus, string) {
@@ -171,21 +291,13 @@ func (s *Service) Execute(sess *browser.Session, dryRun bool) (model.Result, err
 }
 
 func (s *Service) hasSignButton(sess *browser.Session) (bool, error) {
-	selectors := append([]string{}, signButtonSelectors...)
-	selectors = append(selectors,
-		"a[href*='sign']",
-		"button",
-		"input[type='button']",
-		"input[type='submit']",
-	)
-	for _, selector := range selectors {
-		exists, err := sess.ElementExists(selector)
-		if err == nil && exists {
-			body, _ := sess.BodyText()
-			if strings.Contains(body, "签到") || strings.Contains(body, "立即签到") || strings.Contains(body, "签到中") {
-				return true, nil
-			}
-		}
+	states, err := s.querySignElementStates(sess)
+	if err != nil {
+		return false, err
+	}
+	status, _, ok := classifySignElementStates(states)
+	if ok {
+		return status == model.StatusReadyToSign, nil
 	}
 	return false, nil
 }
