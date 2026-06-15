@@ -24,6 +24,7 @@ on:
 env:
   RELEASE_BRANCH: release
   BINARY_NAME: right-signin_linux_amd64
+  RELEASE_REMOTE: https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git
 
 jobs:
   build:
@@ -39,36 +40,31 @@ jobs:
         with:
           go-version-file: build/go.mod
 
-      - name: Checkout release branch
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ env.RELEASE_BRANCH }}
-          path: release
-
       - name: Build right-signin binary
         run: |
           cd build || exit 1
           mkdir -p dist
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "dist/${BINARY_NAME}" ./cmd/right-signin
 
-      - name: Copy binary to release branch
+      - name: Prepare release payload
         run: |
+          mkdir -p release
           cp "build/dist/${BINARY_NAME}" "release/${BINARY_NAME}"
 
       - name: Commit release branch artifacts
         run: |
           cd release || exit 1
+          git init
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git checkout --orphan latest_branch
+          git checkout --orphan "${RELEASE_BRANCH}"
+          git remote add origin "${RELEASE_REMOTE}"
           git add -A
           if git diff --cached --quiet; then
             echo "No changes to commit"
             exit 0
           fi
           git commit -m "build right-signin"
-          git branch -D "${RELEASE_BRANCH}" || true
-          git branch -m "${RELEASE_BRANCH}"
           git push -f origin "${RELEASE_BRANCH}"
 
       - name: Delete workflow runs
