@@ -1,9 +1,20 @@
 name: right-signin
 
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  actions: write
+
 on:
   workflow_dispatch:
   schedule:
     - cron: "30 16 * * *"
+
+env:
+  RELEASE_BRANCH: release
+  BINARY_NAME: right-signin_linux_amd64
 
 jobs:
   sign:
@@ -18,19 +29,36 @@ jobs:
       RIGHT_SIGNIN_GITHUB_SECRET_NAME: COOKIES
       RIGHT_SIGNIN_NOTIFY_SUCCESS: "true"
     steps:
-      - name: Checkout
+      - name: Checkout release branch
         uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          ref: ${{ env.RELEASE_BRANCH }}
 
       - name: Setup Chrome
         uses: browser-actions/setup-chrome@v1
 
-      - name: Download dependencies
-        run: go mod download
+      - name: Run right-signin binary
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 12
+          max_attempts: 3
+          retry_wait_seconds: 10
+          command: |
+            chmod -R 777 "${BINARY_NAME}"
+            ./${BINARY_NAME}
 
-      - name: Run right-signin
-        run: go run ./cmd/right-signin
+      - name: Delete workflow runs
+        uses: Mattraks/delete-workflow-runs@main
+        with:
+          retain_days: 3
+          keep_minimum_runs: 8
+
+  keepalive-job:
+    name: Keepalive Workflow
+    if: ${{ always() && github.event_name != 'push' }}
+    needs: sign
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - uses: liskin/gh-workflow-keepalive@v1.2.1
