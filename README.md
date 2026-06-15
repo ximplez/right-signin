@@ -224,6 +224,13 @@ go run ./cmd/right-signin --debug
 - `RIGHT_SIGNIN_OPENLIST_TOKEN`
 - `RIGHT_SIGNIN_OPENLIST_UPLOAD_DIR`
 
+如果你使用 GitHub Actions 运行，建议像配置飞书 webhook 一样，把这 3 个值直接配置为仓库 Secrets。  
+当前运行工作流 `.github/workflows/right-signin.yml:23` 已经会自动读取：
+
+- `secrets.RIGHT_SIGNIN_OPENLIST_BASE_URL`
+- `secrets.RIGHT_SIGNIN_OPENLIST_TOKEN`
+- `secrets.RIGHT_SIGNIN_OPENLIST_UPLOAD_DIR`
+
 ---
 
 ## 🤖 GitHub Actions 说明
