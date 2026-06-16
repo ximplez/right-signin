@@ -2,7 +2,11 @@ package signin
 
 import (
 	"fmt"
+	"log"
+	"net/url"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,6 +18,18 @@ import (
 
 type Service struct {
 	cfg *config.Config
+}
+
+type signClickCandidate struct {
+	State  browser.ElementState
+	Score  int
+	Reason string
+}
+
+type postClickOutcome struct {
+	Result  model.Result
+	Changed bool
+	Detail  string
 }
 
 type signPageAnchorStatus string
@@ -38,13 +54,14 @@ var (
 		"button[id*='signin']",
 	}
 	signButtonSelectors = []string{
-		"a[href*='erling_qd-sign_in.html']",
 		"#signin-btn",
 		"#signin-checkin-btn",
 		"button.erqd-checkin-btn",
 		"button.erqd-checkin-btn2",
 		"button[id*='signin'][class*='checkin']",
 		"button[id*='signin']",
+		"a[href*='plugin.php'][href*='sign']",
+		"a[href*='erling_qd-sign_in.html']",
 	}
 )
 
@@ -257,37 +274,80 @@ func (s *Service) Execute(sess *browser.Session, dryRun bool) (model.Result, err
 		current.Message = "dry-run 模式下检测到可签到，但未实际点击"
 		return current, nil
 	}
-	if err := sess.SleepRandom(300*time.Millisecond, 800*time.Millisecond); err != nil {
-		return model.Result{Status: model.StatusFailure, Message: "签到前等待失败", URL: current.URL}, err
+	_ = s.captureSignArtifact(sess, "pre-sign-click")
+
+	maxAttempts := s.cfg.ActionRetries + 1
+	if maxAttempts <= 0 {
+		maxAttempts = 1
 	}
-	if err := s.clickSign(sess); err != nil {
-		return model.Result{Status: model.StatusFailure, Message: "点击签到失败", URL: current.URL}, err
+	var lastOutcome postClickOutcome
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			current, err = s.Inspect(sess)
+			if err != nil {
+				return current, err
+			}
+			if current.Status == model.StatusAlreadySigned {
+				return normalizeSignedResult(current), nil
+			}
+			if current.Status != model.StatusReadyToSign {
+				return current, nil
+			}
+		}
+		if err := sess.SleepRandom(300*time.Millisecond, 800*time.Millisecond); err != nil {
+			return model.Result{Status: model.StatusFailure, Message: fmt.Sprintf("签到前等待失败: attempt=%d", attempt), URL: current.URL}, err
+		}
+		candidate, err := s.pickSignClickCandidate(sess)
+		if err != nil {
+			return model.Result{Status: model.StatusFailure, Message: "未找到可靠的签到点击目标", URL: current.URL}, err
+		}
+		preClickURL, _ := sess.CurrentURL()
+		preClickBody, _ := sess.BodyText()
+		_ = s.captureSignArtifact(sess, fmt.Sprintf("pre-sign-click-attempt-%d", attempt))
+		if err := sess.ClickBySelector(candidate.State.Selector); err != nil {
+			return model.Result{Status: model.StatusFailure, Message: fmt.Sprintf("点击签到失败: attempt=%d target=%s", attempt, summarizeSignElement(candidate.State)), URL: current.URL}, err
+		}
+		_ = s.captureSignArtifact(sess, fmt.Sprintf("post-sign-click-attempt-%d", attempt))
+
+		outcome, waitErr := s.waitForPostClickOutcome(sess, candidate, attempt, preClickURL, browser.NormalizeSnippet(preClickBody, 180))
+		lastOutcome = outcome
+		result := normalizeSignedResult(outcome.Result)
+		if waitErr == nil && (result.Status == model.StatusSuccess || result.Status == model.StatusAlreadySigned || result.Status == model.StatusRiskControl || result.Status == model.StatusNeedLogin || result.Status == model.StatusNetworkError) {
+			return result, nil
+		}
+		if !s.shouldRetrySignClick(outcome, attempt, maxAttempts) {
+			if result.Status == model.StatusUnknown || result.Status == model.StatusPageChanged || result.Status == model.StatusReadyToSign {
+				if outcome.Changed {
+					result.Status = model.StatusFailure
+					result.Message = mergeDetail("点击签到后页面有变化，但未出现成功或已签到状态", outcome.Detail)
+				} else {
+					result.Status = model.StatusFailure
+					result.Message = mergeDetail("点击签到后页面无明显变化，可能点到了导航或无效元素", outcome.Detail)
+				}
+			}
+			if result.Status == model.StatusFailure {
+				_ = s.captureSignArtifact(sess, "sign-timeout")
+			}
+			if waitErr != nil {
+				return result, waitErr
+			}
+			return result, nil
+		}
+		log.Printf("签到点击结果未稳定，准备重试: attempt=%d/%d detail=%s", attempt, maxAttempts, outcome.Detail)
 	}
-	if err := sess.SleepRandom(1200*time.Millisecond, 2200*time.Millisecond); err != nil {
-		return model.Result{Status: model.StatusFailure, Message: "等待签到结果失败", URL: current.URL}, err
-	}
-	after, err := s.Inspect(sess)
-	if err != nil {
-		return after, err
-	}
-	if after.Status == model.StatusReadyToSign {
-		body, _ := sess.BodyText()
-		if strings.Contains(body, "签到") {
-			after.Status = model.StatusFailure
-			after.Message = "点击签到后页面未出现成功或已签到状态"
+
+	result := normalizeSignedResult(lastOutcome.Result)
+	if result.Status == model.StatusUnknown || result.Status == model.StatusPageChanged || result.Status == model.StatusReadyToSign {
+		if lastOutcome.Changed {
+			result.Status = model.StatusFailure
+			result.Message = mergeDetail("点击签到后页面有变化，但未出现成功或已签到状态", lastOutcome.Detail)
+		} else {
+			result.Status = model.StatusFailure
+			result.Message = mergeDetail("点击签到后页面无明显变化，可能点到了导航或无效元素", lastOutcome.Detail)
 		}
 	}
-	if after.Status == model.StatusUnknown || after.Status == model.StatusPageChanged {
-		after.Status = model.StatusFailure
-		after.Message = "签到后状态未知，请检查截图和 HTML"
-	}
-	if after.Status == model.StatusAlreadySigned {
-		after.Status = model.StatusSuccess
-		if after.Message == "" {
-			after.Message = "签到成功后页面进入已签到状态"
-		}
-	}
-	return after, nil
+	_ = s.captureSignArtifact(sess, "sign-timeout")
+	return result, nil
 }
 
 func (s *Service) hasSignButton(sess *browser.Session) (bool, error) {
@@ -302,12 +362,279 @@ func (s *Service) hasSignButton(sess *browser.Session) (bool, error) {
 	return false, nil
 }
 
-func (s *Service) clickSign(sess *browser.Session) error {
-	if err := sess.ClickFirstBySelector(signButtonSelectors); err == nil {
+func (s *Service) pickSignClickCandidate(sess *browser.Session) (signClickCandidate, error) {
+	currentURL, _ := sess.CurrentURL()
+	candidates := make([]signClickCandidate, 0, len(signButtonSelectors))
+	for _, selector := range signButtonSelectors {
+		state, err := sess.ElementState(selector)
+		if err != nil {
+			return signClickCandidate{}, err
+		}
+		candidate, ok := scoreSignClickCandidate(currentURL, state)
+		if ok {
+			candidates = append(candidates, candidate)
+		}
+	}
+	if len(candidates) == 0 {
+		return signClickCandidate{}, fmt.Errorf("未找到可靠的签到点击候选，selectors=%v", signButtonSelectors)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Score == candidates[j].Score {
+			return candidates[i].State.Selector < candidates[j].State.Selector
+		}
+		return candidates[i].Score > candidates[j].Score
+	})
+	best := candidates[0]
+	log.Printf("已选择签到点击目标: selector=%s score=%d reason=%s state=%s", best.State.Selector, best.Score, best.Reason, summarizeSignElement(best.State))
+	return best, nil
+}
+
+func scoreSignClickCandidate(currentURL string, state browser.ElementState) (signClickCandidate, bool) {
+	if !state.Exists || !state.Visible || !state.Interactable {
+		return signClickCandidate{}, false
+	}
+	if state.Disabled || strings.EqualFold(state.AriaDisabled, "true") {
+		return signClickCandidate{}, false
+	}
+	text := normalizeAnchorText(state.Text)
+	if text == "已签到" || strings.Contains(text, "今日已签到") {
+		return signClickCandidate{}, false
+	}
+	attrs := strings.ToLower(strings.Join([]string{state.Class, state.ID, state.Name, state.Role, state.Type, state.Href}, " "))
+	score := 0
+	reasons := make([]string, 0, 8)
+	if state.TagName == "button" {
+		score += 120
+		reasons = append(reasons, "button 元素")
+	}
+	if state.TagName == "input" {
+		score += 90
+		reasons = append(reasons, "input 按钮")
+	}
+	if state.Role == "button" {
+		score += 60
+		reasons = append(reasons, "role=button")
+	}
+	if state.ID == "signin-btn" || state.ID == "signin-checkin-btn" {
+		score += 160
+		reasons = append(reasons, "命中固定签到 id")
+	}
+	if strings.Contains(attrs, "erqd-checkin-btn") {
+		score += 140
+		reasons = append(reasons, "命中签到 class")
+	}
+	if strings.Contains(attrs, "signin") || strings.Contains(attrs, "checkin") {
+		score += 70
+		reasons = append(reasons, "属性含 signin/checkin")
+	}
+	if state.Type == "submit" || state.Type == "button" {
+		score += 40
+		reasons = append(reasons, "显式按钮 type")
+	}
+	switch text {
+	case "立即签到":
+		score += 90
+		reasons = append(reasons, "文案=立即签到")
+	case "签到领奖":
+		score += 80
+		reasons = append(reasons, "文案=签到领奖")
+	case "签到":
+		score += 60
+		reasons = append(reasons, "文案=签到")
+	default:
+		if strings.Contains(text, "签到") {
+			score += 45
+			reasons = append(reasons, "文案包含签到")
+		}
+	}
+	if state.TagName == "a" {
+		score -= 45
+		reasons = append(reasons, "anchor 降权")
+	}
+	if strings.Contains(strings.ToLower(state.Href), "plugin.php") && strings.Contains(strings.ToLower(state.Href), "sign") {
+		score += 60
+		reasons = append(reasons, "href 指向签到提交")
+	}
+	if isLikelySignNavigation(currentURL, state.Href) {
+		score -= 90
+		reasons = append(reasons, "疑似仅用于打开签到页的导航链接")
+	}
+	if !state.InViewport {
+		score -= 5
+	}
+	if score <= 0 {
+		return signClickCandidate{}, false
+	}
+	return signClickCandidate{State: state, Score: score, Reason: strings.Join(reasons, ", ")}, true
+}
+
+func (s *Service) waitForPostClickOutcome(sess *browser.Session, candidate signClickCandidate, attempt int, baselineURL, baselineSnippet string) (postClickOutcome, error) {
+	baselineState := candidate.State
+	timeout := 8 * time.Second
+	if s.cfg.PageTimeout > 0 && s.cfg.PageTimeout < timeout {
+		timeout = s.cfg.PageTimeout
+	}
+	if timeout < 4*time.Second {
+		timeout = 4 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	changed := false
+	changeNotes := make([]string, 0, 4)
+	lastResult := model.Result{Status: model.StatusUnknown, Message: "等待签到结果"}
+	lastURL := baselineURL
+
+	for {
+		currentURL, _ := sess.CurrentURL()
+		lastURL = currentURL
+		currentBody, _ := sess.BodyText()
+		currentSnippet := browser.NormalizeSnippet(currentBody, 180)
+		currentState, _ := sess.ElementState(candidate.State.Selector)
+		if currentURL != baselineURL {
+			changed = true
+			changeNotes = appendUnique(changeNotes, "URL 已变化")
+		}
+		if currentSnippet != "" && currentSnippet != baselineSnippet {
+			changed = true
+			changeNotes = appendUnique(changeNotes, "页面摘要已变化")
+		}
+		if signElementChanged(baselineState, currentState) {
+			changed = true
+			changeNotes = appendUnique(changeNotes, "签到元素状态已变化")
+		}
+
+		_, result, inspectErr := s.inspectSignIndicators(sess)
+		if inspectErr == nil {
+			lastResult = result
+			switch result.Status {
+			case model.StatusAlreadySigned, model.StatusSuccess, model.StatusRiskControl, model.StatusNeedLogin, model.StatusNetworkError, model.StatusFailure:
+				detail := buildOutcomeDetail(attempt, candidate, changed, changeNotes, baselineURL, currentURL, currentState)
+				result.Message = mergeDetail(result.Message, detail)
+				return postClickOutcome{Result: result, Changed: changed, Detail: detail}, nil
+			}
+		}
+
+		if !time.Now().Before(deadline) {
+			break
+		}
+		_ = sess.SleepRandom(350*time.Millisecond, 650*time.Millisecond)
+	}
+
+	final, err := s.Inspect(sess)
+	if err == nil {
+		lastResult = final
+	}
+	finalState, _ := sess.ElementState(candidate.State.Selector)
+	detail := buildOutcomeDetail(attempt, candidate, changed, changeNotes, baselineURL, lastURL, finalState)
+	lastResult.Message = mergeDetail(lastResult.Message, detail)
+	return postClickOutcome{Result: lastResult, Changed: changed, Detail: detail}, err
+}
+
+func (s *Service) shouldRetrySignClick(outcome postClickOutcome, attempt, maxAttempts int) bool {
+	if attempt >= maxAttempts {
+		return false
+	}
+	switch outcome.Result.Status {
+	case model.StatusSuccess, model.StatusAlreadySigned, model.StatusRiskControl, model.StatusNeedLogin, model.StatusNetworkError:
+		return false
+	}
+	return !outcome.Changed
+}
+
+func (s *Service) captureSignArtifact(sess *browser.Session, prefix string) error {
+	if s.cfg == nil || strings.TrimSpace(s.cfg.RunArtifactDir) == "" || strings.TrimSpace(prefix) == "" {
 		return nil
 	}
-	if err := sess.ClickFirstByText([]string{"立即签到", "签到领奖", "签到", "打卡"}); err != nil {
-		return fmt.Errorf("点击签到入口失败: %w", err)
+	base := filepath.Join(s.cfg.RunArtifactDir, prefix)
+	shot, html, err := sess.Snapshot(base)
+	if err != nil {
+		log.Printf("保存签到调试留证失败: prefix=%s err=%v", prefix, err)
+		return err
 	}
+	log.Printf("已保存签到调试留证: prefix=%s screenshot=%s html=%s", prefix, shot, html)
 	return nil
+}
+
+func normalizeSignedResult(result model.Result) model.Result {
+	if result.Status == model.StatusAlreadySigned {
+		result.Status = model.StatusSuccess
+		if result.Message == "" {
+			result.Message = "签到成功后页面进入已签到状态"
+		}
+	}
+	return result
+}
+
+func summarizeSignElement(state browser.ElementState) string {
+	return fmt.Sprintf("selector=%s tag=%s text=%s href=%s class=%s id=%s disabled=%t interactable=%t", state.Selector, state.TagName, normalizeAnchorText(state.Text), strings.TrimSpace(state.Href), strings.TrimSpace(state.Class), strings.TrimSpace(state.ID), state.Disabled || strings.EqualFold(state.AriaDisabled, "true"), state.Interactable)
+}
+
+func signElementChanged(before, after browser.ElementState) bool {
+	if before.Exists != after.Exists || before.Visible != after.Visible || before.Interactable != after.Interactable || before.Disabled != after.Disabled || !strings.EqualFold(before.AriaDisabled, after.AriaDisabled) {
+		return true
+	}
+	if normalizeAnchorText(before.Text) != normalizeAnchorText(after.Text) {
+		return true
+	}
+	if strings.TrimSpace(before.Class) != strings.TrimSpace(after.Class) || strings.TrimSpace(before.Href) != strings.TrimSpace(after.Href) {
+		return true
+	}
+	return false
+}
+
+func isLikelySignNavigation(currentURL, href string) bool {
+	href = strings.TrimSpace(strings.ToLower(href))
+	if href == "" {
+		return false
+	}
+	if strings.Contains(href, "plugin.php") && strings.Contains(href, "sign") {
+		return false
+	}
+	if !strings.Contains(href, "erling_qd-sign_in.html") {
+		return false
+	}
+	if strings.Contains(href, "sign=") || strings.Contains(href, "handlekey") || strings.Contains(href, "infloat") {
+		return false
+	}
+	base, err := url.Parse(currentURL)
+	if err != nil {
+		return true
+	}
+	ref, err := url.Parse(href)
+	if err != nil {
+		return true
+	}
+	resolved := base.ResolveReference(ref)
+	return strings.EqualFold(strings.TrimSpace(base.Path), strings.TrimSpace(resolved.Path))
+}
+
+func buildOutcomeDetail(attempt int, candidate signClickCandidate, changed bool, changeNotes []string, baselineURL, finalURL string, finalState browser.ElementState) string {
+	return fmt.Sprintf("attempt=%d candidate={%s} score=%d candidate_reason=%s changed=%t change_notes=%s baseline_url=%s final_url=%s final_state={%s}", attempt, summarizeSignElement(candidate.State), candidate.Score, candidate.Reason, changed, strings.Join(changeNotes, "; "), baselineURL, finalURL, summarizeSignElement(finalState))
+}
+
+func mergeDetail(message, detail string) string {
+	message = strings.TrimSpace(message)
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		return message
+	}
+	if message == "" {
+		return detail
+	}
+	if strings.Contains(message, detail) {
+		return message
+	}
+	return message + " | " + detail
+}
+
+func appendUnique(items []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return items
+	}
+	for _, item := range items {
+		if item == value {
+			return items
+		}
+	}
+	return append(items, value)
 }

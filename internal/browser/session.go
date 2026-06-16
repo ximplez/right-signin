@@ -36,16 +36,25 @@ type DOMRect struct {
 }
 
 type ElementState struct {
-	Selector     string `json:"selector"`
-	Exists       bool   `json:"exists"`
-	Visible      bool   `json:"visible"`
-	Text         string `json:"text,omitempty"`
-	Class        string `json:"class,omitempty"`
-	ID           string `json:"id,omitempty"`
-	Name         string `json:"name,omitempty"`
-	Href         string `json:"href,omitempty"`
-	Disabled     bool   `json:"disabled,omitempty"`
-	AriaDisabled string `json:"aria_disabled,omitempty"`
+	Selector      string  `json:"selector"`
+	Exists        bool    `json:"exists"`
+	Visible       bool    `json:"visible"`
+	Interactable  bool    `json:"interactable"`
+	Text          string  `json:"text,omitempty"`
+	TagName       string  `json:"tag_name,omitempty"`
+	Role          string  `json:"role,omitempty"`
+	Type          string  `json:"type,omitempty"`
+	Class         string  `json:"class,omitempty"`
+	ID            string  `json:"id,omitempty"`
+	Name          string  `json:"name,omitempty"`
+	Href          string  `json:"href,omitempty"`
+	PointerEvents string  `json:"pointer_events,omitempty"`
+	TabIndex      int     `json:"tab_index,omitempty"`
+	Width         float64 `json:"width,omitempty"`
+	Height        float64 `json:"height,omitempty"`
+	InViewport    bool    `json:"in_viewport,omitempty"`
+	Disabled      bool    `json:"disabled,omitempty"`
+	AriaDisabled  string  `json:"aria_disabled,omitempty"`
 }
 
 func New(parent context.Context, cfg *config.Config) (*Session, error) {
@@ -179,27 +188,45 @@ func (s *Session) ElementState(selector string) (ElementState, error) {
 		const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
 		const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
 		const text = ((el.innerText || el.textContent || el.value || '') + '').replace(/\s+/g, ' ').trim();
+		const inViewport = rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < (window.innerHeight || document.documentElement.clientHeight || 0) && rect.left < (window.innerWidth || document.documentElement.clientWidth || 0);
+		const disabled = Boolean(el.disabled || el.getAttribute('disabled') !== null);
+		const ariaDisabled = (el.getAttribute('aria-disabled') || '').trim();
+		const pointerEvents = style && style.pointerEvents ? style.pointerEvents : '';
+		const interactable = !(disabled || ariaDisabled === 'true') && !(style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0' || style.pointerEvents === 'none')) && rect.width > 0 && rect.height > 0;
 		return {
 			selector: %s,
 			exists: true,
 			visible: !(el.hidden || (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0'))) && rect.width > 0 && rect.height > 0,
+			interactable,
 			text,
+			tag_name: (el.tagName || '').toLowerCase(),
+			role: (el.getAttribute('role') || '').trim(),
+			type: (el.getAttribute('type') || '').trim(),
 			class: (el.getAttribute('class') || '').trim(),
 			id: (el.id || '').trim(),
 			name: (el.getAttribute('name') || '').trim(),
 			href: (el.getAttribute('href') || el.href || '').trim(),
-			disabled: Boolean(el.disabled || el.getAttribute('disabled') !== null),
-			aria_disabled: (el.getAttribute('aria-disabled') || '').trim(),
+			pointer_events: pointerEvents,
+			tab_index: Number.isFinite(el.tabIndex) ? el.tabIndex : 0,
+			width: rect.width || 0,
+			height: rect.height || 0,
+			in_viewport: inViewport,
+			disabled: disabled,
+			aria_disabled: ariaDisabled,
 		};
 	})()`, strconv.Quote(selector), strconv.Quote(selector), strconv.Quote(selector))
 	if err := s.Run(chromedp.Evaluate(js, &state)); err != nil {
 		return ElementState{}, err
 	}
 	state.Text = strings.TrimSpace(state.Text)
+	state.TagName = strings.TrimSpace(strings.ToLower(state.TagName))
+	state.Role = strings.TrimSpace(strings.ToLower(state.Role))
+	state.Type = strings.TrimSpace(strings.ToLower(state.Type))
 	state.Class = strings.TrimSpace(state.Class)
 	state.ID = strings.TrimSpace(state.ID)
 	state.Name = strings.TrimSpace(state.Name)
 	state.Href = strings.TrimSpace(state.Href)
+	state.PointerEvents = strings.TrimSpace(strings.ToLower(state.PointerEvents))
 	state.AriaDisabled = strings.TrimSpace(state.AriaDisabled)
 	return state, nil
 }
@@ -256,9 +283,21 @@ func (s *Session) ClickFirstByText(textHints []string) error {
 		const texts = %s;
 		const els = Array.from(document.querySelectorAll('a,button,[role="button"],input[type="button"],input[type="submit"],span,div'));
 		for (const el of els) {
+			const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+			const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
 			const text = ((el.innerText || el.value || '') + '').replace(/\s+/g, ' ').trim();
 			if (!text) continue;
-			if (texts.some(k => text.includes(k))) { el.click(); return true; }
+			if (!texts.some(k => text.includes(k))) continue;
+			if (el.hidden || (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0' || style.pointerEvents === 'none'))) continue;
+			if (rect.width <= 0 || rect.height <= 0) continue;
+			if (el.disabled || el.getAttribute('disabled') !== null || (el.getAttribute('aria-disabled') || '').trim() === 'true') continue;
+			if (el.scrollIntoView) el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+			const events = ['mouseover', 'mousedown', 'mouseup', 'click'];
+			for (const type of events) {
+				el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, composed: true, view: window, buttons: 1 }));
+			}
+			if (typeof el.click === 'function') el.click();
+			return true;
 		}
 		return false;
 	})()`, toJSArray(textHints))
@@ -277,7 +316,19 @@ func (s *Session) ClickFirstBySelector(selectors []string) error {
 		const selectors = %s;
 		for (const selector of selectors) {
 			const el = document.querySelector(selector);
-			if (el) { el.click(); return true; }
+			if (!el) continue;
+			const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+			const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
+			if (el.hidden || (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0' || style.pointerEvents === 'none'))) continue;
+			if (rect.width <= 0 || rect.height <= 0) continue;
+			if (el.disabled || el.getAttribute('disabled') !== null || (el.getAttribute('aria-disabled') || '').trim() === 'true') continue;
+			if (el.scrollIntoView) el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+			const events = ['mouseover', 'mousedown', 'mouseup', 'click'];
+			for (const type of events) {
+				el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, composed: true, view: window, buttons: 1 }));
+			}
+			if (typeof el.click === 'function') el.click();
+			return true;
 		}
 		return false;
 	})()`, toJSArray(selectors))
@@ -287,6 +338,45 @@ func (s *Session) ClickFirstBySelector(selectors []string) error {
 	}
 	if !ok {
 		return fmt.Errorf("未找到可点击 selector: %v", selectors)
+	}
+	return nil
+}
+
+func (s *Session) ClickBySelector(selector string) error {
+	if strings.TrimSpace(selector) == "" {
+		return fmt.Errorf("selector 不能为空")
+	}
+	js := fmt.Sprintf(`(() => {
+		const selector = %s;
+		const el = document.querySelector(selector);
+		if (!el) return { ok: false, reason: 'not_found' };
+		const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+		const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
+		if (el.hidden || (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0' || style.pointerEvents === 'none'))) {
+			return { ok: false, reason: 'not_visible' };
+		}
+		if (rect.width <= 0 || rect.height <= 0) return { ok: false, reason: 'zero_rect' };
+		if (el.disabled || el.getAttribute('disabled') !== null || (el.getAttribute('aria-disabled') || '').trim() === 'true') {
+			return { ok: false, reason: 'disabled' };
+		}
+		if (el.scrollIntoView) el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+		const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+		for (const type of events) {
+			const Ctor = type.startsWith('pointer') ? PointerEvent : MouseEvent;
+			el.dispatchEvent(new Ctor(type, { bubbles: true, cancelable: true, composed: true, view: window, buttons: 1, pointerType: 'mouse' }));
+		}
+		if (typeof el.click === 'function') el.click();
+		return { ok: true, reason: '' };
+	})()`, strconv.Quote(selector))
+	var result struct {
+		OK     bool   `json:"ok"`
+		Reason string `json:"reason"`
+	}
+	if err := s.Run(chromedp.Evaluate(js, &result)); err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("点击 selector=%s 失败: %s", selector, result.Reason)
 	}
 	return nil
 }

@@ -111,3 +111,76 @@ func TestClassifySignElementStates(t *testing.T) {
 		})
 	}
 }
+
+func TestScoreSignClickCandidatePrefersButtonOverSignActionAnchor(t *testing.T) {
+	currentURL := "https://www.right.com.cn/forum/erling_qd-sign_in.html"
+	if _, ok := scoreSignClickCandidate(currentURL, browser.ElementState{
+		Selector:     "a[href*='erling_qd-sign_in.html']",
+		Exists:       true,
+		Visible:      true,
+		Interactable: true,
+		TagName:      "a",
+		Text:         "签到",
+		Href:         "/forum/erling_qd-sign_in.html",
+	}); ok {
+		t.Fatalf("expected plain sign-page navigation anchor to be rejected")
+	}
+
+	anchorCandidate, anchorOK := scoreSignClickCandidate(currentURL, browser.ElementState{
+		Selector:     "a[href*='plugin.php'][href*='sign']",
+		Exists:       true,
+		Visible:      true,
+		Interactable: true,
+		TagName:      "a",
+		Text:         "签到",
+		Href:         "/plugin.php?id=dc_signin:sign&mod=sign&sign=1&infloat=yes&handlekey=qd",
+	})
+	buttonCandidate, buttonOK := scoreSignClickCandidate(currentURL, browser.ElementState{
+		Selector:     "#signin-btn",
+		Exists:       true,
+		Visible:      true,
+		Interactable: true,
+		TagName:      "button",
+		ID:           "signin-btn",
+		Class:        "erqd-checkin-btn",
+		Text:         "立即签到",
+	})
+	if !anchorOK {
+		t.Fatalf("expected sign action anchor to remain as low-priority fallback candidate")
+	}
+	if !buttonOK {
+		t.Fatalf("expected real sign button to be clickable candidate")
+	}
+	if buttonCandidate.Score <= anchorCandidate.Score {
+		t.Fatalf("expected sign button score > nav anchor score, got button=%d anchor=%d", buttonCandidate.Score, anchorCandidate.Score)
+	}
+}
+
+func TestScoreSignClickCandidateRejectsDisabledOrSignedElements(t *testing.T) {
+	currentURL := "https://www.right.com.cn/forum/erling_qd-sign_in.html"
+	if _, ok := scoreSignClickCandidate(currentURL, browser.ElementState{
+		Selector:     "button.erqd-checkin-btn2",
+		Exists:       true,
+		Visible:      true,
+		Interactable: false,
+		TagName:      "button",
+		Class:        "erqd-checkin-btn2",
+		Text:         "已签到",
+		Disabled:     true,
+	}); ok {
+		t.Fatalf("expected disabled signed button to be rejected")
+	}
+}
+
+func TestShouldRetrySignClickOnlyWhenNoChange(t *testing.T) {
+	svc := &Service{}
+	if !svc.shouldRetrySignClick(postClickOutcome{Changed: false, Result: model.Result{Status: model.StatusReadyToSign}}, 1, 2) {
+		t.Fatalf("expected retry when state is still ready_to_sign and page had no change")
+	}
+	if svc.shouldRetrySignClick(postClickOutcome{Changed: true, Result: model.Result{Status: model.StatusReadyToSign}}, 1, 2) {
+		t.Fatalf("expected no retry when page already changed")
+	}
+	if svc.shouldRetrySignClick(postClickOutcome{Changed: false, Result: model.Result{Status: model.StatusRiskControl}}, 1, 2) {
+		t.Fatalf("expected no retry on terminal risk_control status")
+	}
+}
