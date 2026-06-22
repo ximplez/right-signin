@@ -11,6 +11,7 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "30 16 * * *"
+    - cron: "30 04 * * *"
 
 env:
   RELEASE_BRANCH: release
