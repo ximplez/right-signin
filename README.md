@@ -66,7 +66,7 @@
 
 ### 4. 通知与留证
 
-- 飞书机器人通知运行结果
+- 飞书卡片通知会在开始、登录、签到、异常和完成时更新同一张卡片
 - 失败 / 风控 / 页面变化时自动截图与保存 HTML
 - 登录二维码可结合 OpenList 对外提供临时访问链接
 
@@ -90,7 +90,7 @@
 
 ```text
 right-signin/
-├── cmd/right-signin/         # 程序入口
+├── main.go                  # 程序入口
 ├── internal/app/            # Runner 主流程
 ├── internal/browser/        # chromedp 会话、截图、页面操作
 ├── internal/classify/       # 页面文本分类
@@ -101,7 +101,7 @@ right-signin/
 ├── internal/session/        # Cookie 读写与 GitHub Secret 同步
 ├── internal/signin/         # 恩山签到识别与点击逻辑
 ├── .github/workflows/       # GitHub Actions 工作流
-└── runtime/                 # 本地运行缓存、cookies、产物
+└── runtime/                 # 本地运行缓存、Cookie、产物
 ```
 
 ---
@@ -137,19 +137,19 @@ right-signin/
 在仓库根目录执行：
 
 ```bash
-go run ./cmd/right-signin
+go run .
 ```
 
 如果只想验证识别逻辑、不真正点击签到：
 
 ```bash
-go run ./cmd/right-signin --dry-run --notify-success=false
+go run . --dry-run --notify-success=false
 ```
 
 开启有头模式便于观察浏览器行为：
 
 ```bash
-go run ./cmd/right-signin --debug
+go run . --debug
 ```
 
 ---
@@ -163,7 +163,7 @@ go run ./cmd/right-signin --debug
 | 变量名 | 说明 |
 |---|---|
 | `COOKIES` | Cookie JSON 内容，优先级高于本地文件 |
-| `FEISHU_BOT_URL` | 飞书机器人 Webhook |
+| `NOTIFICATION_CONFIG_JSON` | 飞书卡片通知配置，JSON 格式 |
 | `GITHUB_TOKEN` | 用于回写 GitHub Secret 的 Token |
 | `RIGHT_SIGNIN_GITHUB_REPO` | 仓库名，例如 `ximplez/right-signin` |
 | `RIGHT_SIGNIN_GITHUB_SECRET_NAME` | Cookie 回写的 Secret 名，默认 `COOKIES` |
@@ -214,7 +214,28 @@ go run ./cmd/right-signin --debug
 
 额外增加：
 
-- `FEISHU_BOT_URL`
+- `NOTIFICATION_CONFIG_JSON`
+
+`NOTIFICATION_CONFIG_JSON` 会收敛所有通知相关配置，内容示例：
+
+```json
+{
+  "enabled": true,
+  "gatewayBaseUrl": "https://feishu-bot-worker.example.com",
+  "gatewayAuthToken": "your_gateway_token",
+  "appId": "cli_xxx",
+  "templateId": "AAxxxx",
+  "templateVersionName": "",
+  "receiveIdType": "email",
+  "receiveId": "name@example.com",
+  "appName": "恩山论坛自动签到",
+  "openId": "",
+  "defaultUrl": "https://www.right.com.cn/forum/erling_qd-sign_in.html",
+  "progressNotifySeconds": 60
+}
+```
+
+通知会调用 feishu bot gateway 的 `/send_card` 接口，并复用同一条 `messageId` 做卡片更新。卡片模板变量使用 `content`、`foot`、`main_button_text`、`main_button_event`、`sub_button_url`、`title_style` 等字段；二维码刷新会立即更新卡片，已扫码等待确认等过程状态会按 `progressNotifySeconds` 节流。
 
 ### 启用 OpenList 二维码中转
 
@@ -224,9 +245,11 @@ go run ./cmd/right-signin --debug
 - `RIGHT_SIGNIN_OPENLIST_TOKEN`
 - `RIGHT_SIGNIN_OPENLIST_UPLOAD_DIR`
 
-如果你使用 GitHub Actions 运行，建议像配置飞书 webhook 一样，把这 3 个值直接配置为仓库 Secrets。  
-当前运行工作流 `.github/workflows/right-signin.yml:23` 已经会自动读取：
+如果你使用 GitHub Actions 运行，建议把通知配置和 OpenList 配置都放到 Repository secrets。
 
+当前运行工作流 `.github/workflows/right-signin.yml` 已经会自动读取：
+
+- `secrets.NOTIFICATION_CONFIG_JSON`
 - `secrets.RIGHT_SIGNIN_OPENLIST_BASE_URL`
 - `secrets.RIGHT_SIGNIN_OPENLIST_TOKEN`
 - `secrets.RIGHT_SIGNIN_OPENLIST_UPLOAD_DIR`

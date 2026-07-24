@@ -17,36 +17,36 @@ const (
 )
 
 type Config struct {
-	AppName             string
-	SignInURL           string
-	CookiesEnv          string
-	GitHubToken         string
-	GitHubRepo          string
-	GitHubSecretName    string
-	Debug               bool
-	DryRun              bool
-	NotifySuccess       bool
-	FeishuWebhook       string
-	OpenListBaseURL     string
-	OpenListToken       string
-	OpenListUploadDir   string
-	Timeout             time.Duration
-	PageTimeout         time.Duration
-	LoginWaitTimeout    time.Duration
-	LoginPollInterval   time.Duration
-	QRCodeCheckInterval time.Duration
-	MaxQRRefresh        int
-	NavigationRetries   int
-	ActionRetries       int
-	UserDataDir         string
-	CookiesPath         string
-	ArtifactsRoot       string
-	UserAgent           string
-	BrowserLang         string
-	WindowWidth         int
-	WindowHeight        int
-	RunID               string
-	RunArtifactDir      string
+	AppName                string
+	SignInURL              string
+	CookiesEnv             string
+	GitHubToken            string
+	GitHubRepo             string
+	GitHubSecretName       string
+	Debug                  bool
+	DryRun                 bool
+	NotifySuccess          bool
+	NotificationConfigJSON string
+	OpenListBaseURL        string
+	OpenListToken          string
+	OpenListUploadDir      string
+	Timeout                time.Duration
+	PageTimeout            time.Duration
+	LoginWaitTimeout       time.Duration
+	LoginPollInterval      time.Duration
+	QRCodeCheckInterval    time.Duration
+	MaxQRRefresh           int
+	NavigationRetries      int
+	ActionRetries          int
+	UserDataDir            string
+	CookiesPath            string
+	ArtifactsRoot          string
+	UserAgent              string
+	BrowserLang            string
+	WindowWidth            int
+	WindowHeight           int
+	RunID                  string
+	RunArtifactDir         string
 }
 
 func Load() (*Config, error) {
@@ -86,7 +86,7 @@ func Load() (*Config, error) {
 	cfg.GitHubToken = strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
 	cfg.GitHubRepo = getenv("RIGHT_SIGNIN_GITHUB_REPO", getenv("GITHUB_REPOSITORY", ""))
 	cfg.GitHubSecretName = getenv("RIGHT_SIGNIN_GITHUB_SECRET_NAME", "COOKIES")
-	cfg.FeishuWebhook = strings.TrimSpace(os.Getenv("FEISHU_BOT_URL"))
+	cfg.NotificationConfigJSON = strings.TrimSpace(os.Getenv("NOTIFICATION_CONFIG_JSON"))
 	cfg.OpenListBaseURL = strings.TrimRight(getenv("RIGHT_SIGNIN_OPENLIST_BASE_URL", "/"), "/")
 	cfg.OpenListToken = strings.TrimSpace(os.Getenv("RIGHT_SIGNIN_OPENLIST_TOKEN"))
 	cfg.OpenListUploadDir = ensureLeadingSlash(getenv("RIGHT_SIGNIN_OPENLIST_UPLOAD_DIR", "/right-signin"))

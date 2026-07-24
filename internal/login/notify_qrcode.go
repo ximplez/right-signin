@@ -16,30 +16,65 @@ func (s *QQAuthenticator) sendQRCode(ctx context.Context, qrInfo QRCodeInfo, ref
 		return nil
 	}
 	targetURL := firstNonEmpty(qrInfo.ViewerURL, qrInfo.PreviewURL)
-	title := notify.BoldText(notify.BlueText("QQ 登录二维码"))
-	if refreshCount > 0 {
-		title = notify.BoldText(notify.OrangeText("QQ 登录二维码已刷新"))
-	}
-	statusLine := notify.GreenText("请直接点击消息 URL 扫码；如后续收到刷新消息，请始终以最新一条为准。")
-	if targetURL == "" {
-		statusLine = notify.RedText("当前尚未生成可访问 URL，请等待下一条刷新通知。")
-	}
-	msg := notify.Message{
-		App:   s.cfg.AppName,
-		Title: title,
-		Msg: strings.Join([]string{
-			fmt.Sprintf("%s %s", notify.BoldText("运行ID:"), s.cfg.RunID),
-			fmt.Sprintf("%s %s", notify.BoldText("阶段:"), notify.PurpleText("QQ 登录")),
-			fmt.Sprintf("%s %d", notify.BoldText("刷新次数:"), refreshCount),
-			statusLine,
-		}, "\n"),
-		TargetURL: targetURL,
-	}
-	if err := s.notifier.Notify(ctx, msg); err != nil {
-		return err
+	card := notify.BuildRightSigninCard(notify.RightSigninStatusLoginRequired, notify.SigninCardState{
+		RunID:        s.cfg.RunID,
+		Stage:        "qq-login",
+		Status:       "need_login",
+		Message:      loginQRCodeMessage(targetURL),
+		SiteURL:      s.cfg.SignInURL,
+		CurrentURL:   qrInfo.CurrentURL,
+		QRCodeURL:    targetURL,
+		QRCodeKind:   qrInfo.Kind,
+		RefreshCount: refreshCount,
+	})
+	if cardNotifier, ok := s.notifier.(notify.CardNotifier); ok {
+		if err := cardNotifier.Upsert(ctx, card); err != nil {
+			return err
+		}
+	} else {
+		msg := notify.Message{
+			App:   s.cfg.AppName,
+			Title: notify.BoldText(notify.BlueText(card.Title)),
+			Msg: strings.Join([]string{
+				fmt.Sprintf("%s %s", notify.BoldText("运行ID:"), s.cfg.RunID),
+				fmt.Sprintf("%s %s", notify.BoldText("阶段:"), notify.PurpleText("QQ 登录")),
+				fmt.Sprintf("%s %d", notify.BoldText("刷新次数:"), refreshCount),
+				card.Content,
+			}, "\n"),
+			TargetURL: targetURL,
+		}
+		if err := s.notifier.Notify(ctx, msg); err != nil {
+			return err
+		}
 	}
 	log.Printf("已发送二维码通知: refresh=%d kind=%s viewerURL=%s oauth=%s preview=%s", refreshCount, qrInfo.Kind, browser.NormalizeSnippet(targetURL, 180), browser.NormalizeSnippet(qrInfo.CurrentURL, 180), browser.NormalizeSnippet(qrInfo.PreviewURL, 180))
 	return nil
+}
+
+func (s *QQAuthenticator) updateLoginProgress(ctx context.Context, status notify.RightSigninStatus, qrInfo QRCodeInfo, refreshCount int, message string) {
+	cardNotifier, ok := s.notifier.(notify.CardNotifier)
+	if !ok {
+		return
+	}
+	targetURL := firstNonEmpty(qrInfo.ViewerURL, qrInfo.PreviewURL)
+	_ = cardNotifier.NotifyProgress(ctx, notify.BuildRightSigninCard(status, notify.SigninCardState{
+		RunID:        s.cfg.RunID,
+		Stage:        "qq-login",
+		Status:       string(status),
+		Message:      message,
+		SiteURL:      s.cfg.SignInURL,
+		CurrentURL:   qrInfo.CurrentURL,
+		QRCodeURL:    targetURL,
+		QRCodeKind:   qrInfo.Kind,
+		RefreshCount: refreshCount,
+	}))
+}
+
+func loginQRCodeMessage(targetURL string) string {
+	if targetURL == "" {
+		return "当前尚未生成可访问二维码 URL，请等待下一次刷新。"
+	}
+	return "请打开二维码完成 QQ 登录；二维码刷新后这张卡片会自动更新为最新入口。"
 }
 
 func shouldNotifyQRCodeChange(prev, next QRCodeInfo) (bool, string) {

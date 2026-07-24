@@ -10,6 +10,7 @@ import (
 	"right-signin/internal/browser"
 	"right-signin/internal/classify"
 	"right-signin/internal/model"
+	"right-signin/internal/notify"
 )
 
 func (s *QQAuthenticator) EnsureLoggedIn(ctx context.Context, sess *browser.Session) (model.Result, error) {
@@ -114,10 +115,12 @@ func (s *QQAuthenticator) waitForQRCodeAndLogin(ctx context.Context, sess *brows
 			switch protocolResult.Code {
 			case "0":
 				log.Printf("QQ 协议层确认扫码授权完成，等待 OAuth 页面继续跳转")
+				s.updateLoginProgress(ctx, notify.RightSigninStatusLoginWaiting, qrInfo, refreshCount, "QQ 已确认扫码授权，正在等待 OAuth 页面回跳。")
 			case "66":
 				// 二维码仍有效，继续等待。
 			case "67":
 				log.Printf("QQ 协议层确认二维码已被扫码，等待手机确认授权")
+				s.updateLoginProgress(ctx, notify.RightSigninStatusLoginWaiting, qrInfo, refreshCount, "二维码已被扫码，请在 QQ 客户端确认授权。")
 			case "65", "68":
 				if refreshCount >= maxRefreshCount {
 					return model.Result{Status: model.StatusQRCodeExpiredTooMany, Message: fmt.Sprintf("二维码协议层刷新次数超限: 已刷新 %d 次，最后状态=%s", refreshCount, protocolResult.Message), QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseFile(qrInfo.ImagePath, qrInfo.PageShot), RefreshCount: refreshCount}, nil
