@@ -17,3 +17,7 @@ func chooseFile(v1, v2 string) string {
 	}
 	return v2
 }
+
+func chooseQRCodeImageFile(info QRCodeInfo) string {
+	return chooseFile(info.DisplayPath, chooseFile(info.ImagePath, info.PageShot))
+}

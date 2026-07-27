@@ -1,9 +1,12 @@
 package notify
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -75,17 +78,28 @@ func TestFeishuCardNotifierUpsertSendsThenUpdates(t *testing.T) {
 	if got := requests[1].TemplateVariable["title"]; got != "签到成功" {
 		t.Fatalf("title = %v, want 签到成功", got)
 	}
+	if len(requests[0].Images) != 0 {
+		t.Fatalf("first images length = %d, want 0", len(requests[0].Images))
+	}
+	if len(requests[1].Images) != 0 {
+		t.Fatalf("second images length = %d, want 0", len(requests[1].Images))
+	}
 }
 
 func TestBuildRightSigninLoginCardUsesQRCodeButton(t *testing.T) {
+	qrcodePath := filepath.Join(t.TempDir(), "qrcode.png")
+	if err := os.WriteFile(qrcodePath, []byte{1, 2, 3}, 0o644); err != nil {
+		t.Fatalf("write qrcode fixture: %v", err)
+	}
 	card := BuildRightSigninCard(RightSigninStatusLoginRequired, SigninCardState{
-		RunID:        "run-1",
-		Stage:        "qq-login",
-		Status:       "need_login",
-		Message:      "需要扫码",
-		QRCodeURL:    "https://example.com/qrcode",
-		QRCodeKind:   "image",
-		RefreshCount: 1,
+		RunID:           "run-1",
+		Stage:           "qq-login",
+		Status:          "need_login",
+		Message:         "需要扫码",
+		QRCodeURL:       "https://example.com/qrcode",
+		QRCodeKind:      "image",
+		QRCodeImagePath: qrcodePath,
+		RefreshCount:    1,
 	})
 	vars := card.toTemplateVariable()
 
@@ -104,6 +118,73 @@ func TestBuildRightSigninLoginCardUsesQRCodeButton(t *testing.T) {
 	if got := vars["sub_button"]; got != false {
 		t.Fatalf("sub_button = %v, want false", got)
 	}
+	images := card.toGatewayImages(DefaultQRCodeImageVariable)
+	if len(images) != 1 {
+		t.Fatalf("images length = %d, want 1", len(images))
+	}
+	if images[0].Variable != DefaultQRCodeImageVariable {
+		t.Fatalf("images[0].Variable = %s, want %s", images[0].Variable, DefaultQRCodeImageVariable)
+	}
+	if images[0].Base64 != base64.StdEncoding.EncodeToString([]byte{1, 2, 3}) {
+		t.Fatalf("images[0].Base64 = %s, want qrcode base64", images[0].Base64)
+	}
+	if images[0].ContentType != "image/png" {
+		t.Fatalf("images[0].ContentType = %s, want image/png", images[0].ContentType)
+	}
+}
+
+func TestFeishuCardNotifierSendsQRCodeImageThroughGateway(t *testing.T) {
+	qrcodePath := filepath.Join(t.TempDir(), "qrcode.png")
+	if err := os.WriteFile(qrcodePath, []byte{1, 2, 3}, 0o644); err != nil {
+		t.Fatalf("write qrcode fixture: %v", err)
+	}
+	var request sendCardRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"data": map[string]any{
+				"messageId": "om_test",
+			},
+		})
+	}))
+	defer server.Close()
+
+	notifier := NewFeishuCardNotifier(CardConfig{
+		Enabled:             true,
+		GatewayBaseURL:      server.URL,
+		GatewayAuthToken:    "token",
+		AppID:               "cli_test",
+		TemplateID:          "ctp_test",
+		QRCodeImageVariable: "login_qrcode",
+	})
+	err := notifier.Upsert(t.Context(), BuildRightSigninCard(RightSigninStatusLoginRequired, SigninCardState{
+		RunID:           "run-1",
+		Stage:           "qq-login",
+		Status:          "need_login",
+		Message:         "需要扫码",
+		QRCodeURL:       "https://example.com/qrcode",
+		QRCodeKind:      "image",
+		QRCodeImagePath: qrcodePath,
+	}))
+	if err != nil {
+		t.Fatalf("Upsert err = %v", err)
+	}
+
+	if len(request.Images) != 1 {
+		t.Fatalf("request.Images length = %d, want 1", len(request.Images))
+	}
+	if request.Images[0].Variable != "login_qrcode" {
+		t.Fatalf("request.Images[0].Variable = %s, want login_qrcode", request.Images[0].Variable)
+	}
+	if request.Images[0].Base64 != base64.StdEncoding.EncodeToString([]byte{1, 2, 3}) {
+		t.Fatalf("request.Images[0].Base64 = %s, want qrcode base64", request.Images[0].Base64)
+	}
+	if request.Images[0].ContentType != DefaultQRCodeImageType {
+		t.Fatalf("request.Images[0].ContentType = %s, want %s", request.Images[0].ContentType, DefaultQRCodeImageType)
+	}
 }
 
 func TestBuildRightSigninFinishedCardIncludesSummary(t *testing.T) {
@@ -118,16 +199,57 @@ func TestBuildRightSigninFinishedCardIncludesSummary(t *testing.T) {
 	})
 
 	for _, want := range []string{
-		"**运行ID**：run-1",
-		"**阶段**：success",
-		"**当前状态**：success",
-		"**说明**：签到成功",
-		"**运行耗时**：1分15秒",
-		"**截图留证**：`runtime/artifacts/success.png`",
-		"**HTML 留证**：`runtime/artifacts/success.html`",
+		"🟢 **状态**：<font color='green'>签到成功</font>",
+		"✅ **结果**：签到成功",
+		"⏱️ **耗时**：1分15秒",
 	} {
 		if !strings.Contains(card.Content, want) {
 			t.Fatalf("card.Content missing %q:\n%s", want, card.Content)
+		}
+	}
+	for _, notWant := range []string{
+		"运行ID",
+		"阶段",
+		"截图留证",
+		"HTML 留证",
+		"runtime/artifacts",
+	} {
+		if strings.Contains(card.Content, notWant) {
+			t.Fatalf("card.Content contains noisy detail %q:\n%s", notWant, card.Content)
+		}
+	}
+}
+
+func TestBuildRightSigninFailedCardKeepsErrorSummaryOnly(t *testing.T) {
+	card := BuildRightSigninCard(RightSigninStatusFailed, SigninCardState{
+		RunID:          "run-1",
+		Stage:          "signin",
+		Status:         "page_changed",
+		Message:        "未识别到签到状态",
+		CurrentURL:     "https://www.right.com.cn/forum/very/noisy/page",
+		ScreenshotPath: "runtime/artifacts/failure.png",
+		HTMLPath:       "runtime/artifacts/failure.html",
+		Duration:       3 * time.Second,
+	})
+
+	for _, want := range []string{
+		"🔴 **状态**：<font color='red'>页面状态变化</font>",
+		"⚠️ **异常**：未识别到签到状态",
+		"📎 **留证**：已保存截图/HTML，详见运行日志。",
+	} {
+		if !strings.Contains(card.Content, want) {
+			t.Fatalf("card.Content missing %q:\n%s", want, card.Content)
+		}
+	}
+	for _, notWant := range []string{
+		"CurrentURL",
+		"https://www.right.com.cn/forum/very/noisy/page",
+		"runtime/artifacts/failure.png",
+		"runtime/artifacts/failure.html",
+		"二维码类型",
+	} {
+		if strings.Contains(card.Content, notWant) {
+			t.Fatalf("card.Content contains noisy detail %q:\n%s", notWant, card.Content)
 		}
 	}
 }
@@ -145,6 +267,7 @@ func TestNewCardConfigFromEnvParsesNotificationConfigJSON(t *testing.T) {
 			"appName": "恩山论坛自动签到",
 			"openId": "ou_test",
 			"defaultUrl": "https://www.right.com.cn/forum/erling_qd-sign_in.html",
+			"qrCodeImageVariable": "login_qrcode",
 			"progressNotifySeconds": "30"
 		}`,
 	}
@@ -161,6 +284,9 @@ func TestNewCardConfigFromEnvParsesNotificationConfigJSON(t *testing.T) {
 	}
 	if cfg.ProgressNotifyEvery != 30*time.Second {
 		t.Fatalf("ProgressNotifyEvery = %s, want 30s", cfg.ProgressNotifyEvery)
+	}
+	if cfg.QRCodeImageVariable != "login_qrcode" {
+		t.Fatalf("QRCodeImageVariable = %s, want login_qrcode", cfg.QRCodeImageVariable)
 	}
 }
 

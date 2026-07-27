@@ -17,15 +17,16 @@ func (s *QQAuthenticator) sendQRCode(ctx context.Context, qrInfo QRCodeInfo, ref
 	}
 	targetURL := firstNonEmpty(qrInfo.ViewerURL, qrInfo.PreviewURL)
 	card := notify.BuildRightSigninCard(notify.RightSigninStatusLoginRequired, notify.SigninCardState{
-		RunID:        s.cfg.RunID,
-		Stage:        "qq-login",
-		Status:       "need_login",
-		Message:      loginQRCodeMessage(targetURL),
-		SiteURL:      s.cfg.SignInURL,
-		CurrentURL:   qrInfo.CurrentURL,
-		QRCodeURL:    targetURL,
-		QRCodeKind:   qrInfo.Kind,
-		RefreshCount: refreshCount,
+		RunID:           s.cfg.RunID,
+		Stage:           "qq-login",
+		Status:          "need_login",
+		Message:         loginQRCodeMessage(targetURL),
+		SiteURL:         s.cfg.SignInURL,
+		CurrentURL:      qrInfo.CurrentURL,
+		QRCodeURL:       targetURL,
+		QRCodeKind:      qrInfo.Kind,
+		QRCodeImagePath: chooseQRCodeImageFile(qrInfo),
+		RefreshCount:    refreshCount,
 	})
 	if cardNotifier, ok := s.notifier.(notify.CardNotifier); ok {
 		if err := cardNotifier.Upsert(ctx, card); err != nil {
@@ -33,14 +34,9 @@ func (s *QQAuthenticator) sendQRCode(ctx context.Context, qrInfo QRCodeInfo, ref
 		}
 	} else {
 		msg := notify.Message{
-			App:   s.cfg.AppName,
-			Title: notify.BoldText(notify.BlueText(card.Title)),
-			Msg: strings.Join([]string{
-				fmt.Sprintf("%s %s", notify.BoldText("运行ID:"), s.cfg.RunID),
-				fmt.Sprintf("%s %s", notify.BoldText("阶段:"), notify.PurpleText("QQ 登录")),
-				fmt.Sprintf("%s %d", notify.BoldText("刷新次数:"), refreshCount),
-				card.Content,
-			}, "\n"),
+			App:       s.cfg.AppName,
+			Title:     notify.BoldText(notify.BlueText(card.Title)),
+			Msg:       card.Content,
 			TargetURL: targetURL,
 		}
 		if err := s.notifier.Notify(ctx, msg); err != nil {
@@ -58,15 +54,16 @@ func (s *QQAuthenticator) updateLoginProgress(ctx context.Context, status notify
 	}
 	targetURL := firstNonEmpty(qrInfo.ViewerURL, qrInfo.PreviewURL)
 	_ = cardNotifier.NotifyProgress(ctx, notify.BuildRightSigninCard(status, notify.SigninCardState{
-		RunID:        s.cfg.RunID,
-		Stage:        "qq-login",
-		Status:       string(status),
-		Message:      message,
-		SiteURL:      s.cfg.SignInURL,
-		CurrentURL:   qrInfo.CurrentURL,
-		QRCodeURL:    targetURL,
-		QRCodeKind:   qrInfo.Kind,
-		RefreshCount: refreshCount,
+		RunID:           s.cfg.RunID,
+		Stage:           "qq-login",
+		Status:          string(status),
+		Message:         message,
+		SiteURL:         s.cfg.SignInURL,
+		CurrentURL:      qrInfo.CurrentURL,
+		QRCodeURL:       targetURL,
+		QRCodeKind:      qrInfo.Kind,
+		QRCodeImagePath: chooseQRCodeImageFile(qrInfo),
+		RefreshCount:    refreshCount,
 	}))
 }
 

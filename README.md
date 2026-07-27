@@ -231,11 +231,14 @@ go run . --debug
   "appName": "恩山论坛自动签到",
   "openId": "",
   "defaultUrl": "https://www.right.com.cn/forum/erling_qd-sign_in.html",
+  "qrCodeImageVariable": "content_image",
   "progressNotifySeconds": 60
 }
 ```
 
 通知会调用 feishu bot gateway 的 `/send_card` 接口，并复用同一条 `messageId` 做卡片更新。卡片模板变量使用 `content`、`foot`、`main_button_text`、`main_button_event`、`sub_button_url`、`title_style` 等字段；二维码刷新会立即更新卡片，已扫码等待确认等过程状态会按 `progressNotifySeconds` 节流。
+
+登录二维码会优先使用本地裁剪后的二维码图片，通过 gateway 的 `images[].base64` 上传并嵌入卡片图片组件。卡片模板需要提前配置一个 `Image` 类型变量，默认变量名为 `content_image`；如果模板中使用其它变量名，可通过 `qrCodeImageVariable` 覆盖。非登录二维码状态不传图片参数，有图模板的占位图由 gateway 根据模板结构自动补齐。
 
 ### 启用 OpenList 二维码中转
 

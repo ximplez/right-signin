@@ -3,11 +3,14 @@ package notify
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +22,8 @@ import (
 const (
 	DefaultRightSigninAppName  = "恩山论坛自动签到"
 	DefaultRightSigninURL      = "https://www.right.com.cn/forum/erling_qd-sign_in.html"
+	DefaultQRCodeImageVariable = "content_image"
+	DefaultQRCodeImageType     = "image/png"
 	DefaultProgressNotifyEvery = time.Minute
 	NotificationConfigEnv      = "NOTIFICATION_CONFIG_JSON"
 )
@@ -36,6 +41,7 @@ type CardConfig struct {
 	AppName             string
 	OpenID              string
 	DefaultURL          string
+	QRCodeImageVariable string
 	ProgressNotifyEvery time.Duration
 }
 
@@ -61,6 +67,8 @@ type CardMessage struct {
 	SubButtonText      string
 	SubButtonDisabled  bool
 	SubButtonURL       string
+	QRCodeImageBase64  string
+	QRCodeImageType    string
 	OpenID             string
 	Status             string
 	Action             string
@@ -68,20 +76,21 @@ type CardMessage struct {
 }
 
 type SigninCardState struct {
-	RunID          string
-	Stage          string
-	Status         string
-	Message        string
-	SiteURL        string
-	CurrentURL     string
-	QRCodeURL      string
-	QRCodeKind     string
-	ScreenshotPath string
-	HTMLPath       string
-	RefreshCount   int
-	CookieCount    int
-	Duration       time.Duration
-	DryRun         bool
+	RunID           string
+	Stage           string
+	Status          string
+	Message         string
+	SiteURL         string
+	CurrentURL      string
+	QRCodeURL       string
+	QRCodeKind      string
+	QRCodeImagePath string
+	ScreenshotPath  string
+	HTMLPath        string
+	RefreshCount    int
+	CookieCount     int
+	Duration        time.Duration
+	DryRun          bool
 }
 
 type RightSigninStatus string
@@ -106,6 +115,14 @@ type sendCardRequest struct {
 	TemplateID          string         `json:"templateId"`
 	TemplateVersionName string         `json:"templateVersionName,omitempty"`
 	TemplateVariable    map[string]any `json:"templateVariable"`
+	Images              []cardImageReq `json:"images,omitempty"`
+}
+
+type cardImageReq struct {
+	Variable    string `json:"variable"`
+	Base64      string `json:"base64,omitempty"`
+	FileName    string `json:"fileName,omitempty"`
+	ContentType string `json:"contentType,omitempty"`
 }
 
 type gatewayCardResponse struct {
@@ -129,6 +146,7 @@ type notificationConfigJSON struct {
 	AppName             string               `json:"appName"`
 	OpenID              string               `json:"openId"`
 	DefaultURL          string               `json:"defaultUrl"`
+	QRCodeImageVariable string               `json:"qrCodeImageVariable"`
 	ProgressSeconds     any                  `json:"progressNotifySeconds"`
 	Card                notificationCardJSON `json:"card"`
 }
@@ -172,6 +190,7 @@ func NewCardConfigFromEnv(getEnv func(string) string) CardConfig {
 		AppName:             firstNonEmpty(raw.AppName, DefaultRightSigninAppName),
 		OpenID:              firstNonEmpty(raw.OpenID, raw.Card.OpenID),
 		DefaultURL:          firstNonEmpty(raw.DefaultURL, raw.Card.SubButtonURL, DefaultRightSigninURL),
+		QRCodeImageVariable: firstNonEmpty(raw.QRCodeImageVariable, DefaultQRCodeImageVariable),
 		ProgressNotifyEvery: parseProgressNotifyEvery(raw.ProgressSeconds),
 	}
 	return cfg.normalize()
@@ -269,6 +288,7 @@ func (n *FeishuCardNotifier) callGateway(ctx context.Context, messageID string, 
 		TemplateID:          n.config.TemplateID,
 		TemplateVersionName: n.config.TemplateVersionName,
 		TemplateVariable:    message.toTemplateVariable(),
+		Images:              message.toGatewayImages(n.config.QRCodeImageVariable),
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -330,8 +350,8 @@ func BuildRightSigninCard(status RightSigninStatus, state SigninCardState) CardM
 		Title:              "签到任务准备开始",
 		SubTitle:           "正在启动浏览器",
 		TitleStyle:         "blue",
-		Content:            buildRightSigninContent(state),
-		Foot:               "后续登录、签到和异常留证都会持续更新在这张卡片。",
+		Content:            buildRightSigninContent(status, state),
+		Foot:               "状态会持续更新在这张卡片。",
 		MainButtonText:     "自动执行中",
 		MainButtonDisabled: true,
 		SubButtonText:      "打开恩山论坛",
@@ -346,7 +366,7 @@ func BuildRightSigninCard(status RightSigninStatus, state SigninCardState) CardM
 		card.Title = "正在检查登录态"
 		card.SubTitle = "正在恢复 Cookie 并识别页面状态"
 		card.TitleStyle = "blue"
-		card.Foot = "如果登录态失效，会自动推送 QQ 扫码入口并继续更新这张卡片。"
+		card.Foot = "如需扫码，会在这张卡片中展示二维码。"
 	case RightSigninStatusLoginRequired:
 		card.Title = "需要扫码登录"
 		if state.RefreshCount > 0 {
@@ -354,47 +374,49 @@ func BuildRightSigninCard(status RightSigninStatus, state SigninCardState) CardM
 		}
 		card.SubTitle = "请打开二维码完成 QQ 登录"
 		card.TitleStyle = "orange"
-		card.Foot = "二维码失效后会自动刷新并更新这张卡片，扫码完成后任务会继续执行。"
+		card.Foot = "扫码后将继续签到流程。"
 		card.MainButtonText = "等待扫码"
 		card.SubButtonText = "打开登录二维码"
 		card.SubButtonURL = state.QRCodeURL
 		card.SubButtonDisabled = state.QRCodeURL == ""
+		card.setQRCodeImage(state.QRCodeImagePath)
 	case RightSigninStatusLoginWaiting:
 		card.Title = "已扫码，等待确认"
 		card.SubTitle = "请在 QQ 客户端确认授权"
 		card.TitleStyle = "wathet"
-		card.Foot = "确认完成后会自动回到签到页继续执行；如果二维码失效，卡片会刷新为新的扫码入口。"
+		card.Foot = "确认后会自动回到签到页。"
 		card.MainButtonText = "等待确认"
 		card.SubButtonText = "打开登录二维码"
 		card.SubButtonURL = state.QRCodeURL
 		card.SubButtonDisabled = state.QRCodeURL == ""
+		card.setQRCodeImage(state.QRCodeImagePath)
 	case RightSigninStatusLoginSuccess:
 		card.Title = "登录成功"
 		card.SubTitle = "正在回到签到页"
 		card.TitleStyle = "turquoise"
-		card.Foot = "登录态已确认，正在继续执行签到流程。"
+		card.Foot = "正在继续签到流程。"
 	case RightSigninStatusSigning:
 		card.Title = "正在执行签到"
 		card.SubTitle = "已进入签到页"
 		card.TitleStyle = "wathet"
-		card.Foot = "正在识别签到按钮和页面状态，异常时会自动截图留证。"
+		card.Foot = "正在处理签到动作。"
 	case RightSigninStatusProgressWarning:
 		card.Title = "签到进度异常"
-		card.SubTitle = "已记录当前页面状态"
+		card.SubTitle = "已记录异常摘要"
 		card.TitleStyle = "orange"
-		card.Foot = "程序会继续收敛到明确结果；当前阶段和页面信息已保留在卡片中。"
+		card.Foot = "详细页面信息请查看运行日志。"
 		card.MainButtonText = "检查中"
 	case RightSigninStatusFailed:
 		card.Title = "签到失败"
 		card.SubTitle = resultSubtitle(state)
 		card.TitleStyle = "red"
-		card.Foot = "请检查登录态、页面结构、网络和 GitHub Secrets 配置。"
+		card.Foot = "请查看运行日志和留证文件。"
 		card.MainButtonText = "已失败"
 	case RightSigninStatusFinished:
 		card.Title = resultTitle(state)
 		card.SubTitle = resultSubtitle(state)
 		card.TitleStyle = resultTitleStyle(state)
-		card.Foot = "本次任务已结束，卡片不会继续更新。"
+		card.Foot = "本次任务已结束。"
 		card.MainButtonText = "已完成"
 	}
 	return card
@@ -411,6 +433,7 @@ func (c CardConfig) normalize() CardConfig {
 	c.AppName = firstNonEmpty(c.AppName, DefaultRightSigninAppName)
 	c.OpenID = strings.TrimSpace(c.OpenID)
 	c.DefaultURL = firstNonEmpty(c.DefaultURL, DefaultRightSigninURL)
+	c.QRCodeImageVariable = firstNonEmpty(c.QRCodeImageVariable, DefaultQRCodeImageVariable)
 	if c.ProgressNotifyEvery <= 0 {
 		c.ProgressNotifyEvery = DefaultProgressNotifyEvery
 	}
@@ -479,6 +502,61 @@ func (c CardConfig) applyMessageDefaults(message CardMessage) CardMessage {
 	return message
 }
 
+func (m CardMessage) toGatewayImages(variable string) []cardImageReq {
+	base64Value := strings.TrimSpace(m.QRCodeImageBase64)
+	if base64Value == "" {
+		return nil
+	}
+	return []cardImageReq{
+		{
+			Variable:    firstNonEmpty(variable, DefaultQRCodeImageVariable),
+			Base64:      base64Value,
+			FileName:    "right-signin-login-qrcode.png",
+			ContentType: firstNonEmpty(m.QRCodeImageType, DefaultQRCodeImageType),
+		},
+	}
+}
+
+func (m *CardMessage) setQRCodeImage(path string) {
+	image := qrcodeImageFromFile(path)
+	m.QRCodeImageBase64 = image.Base64
+	m.QRCodeImageType = image.ContentType
+}
+
+type qrcodeImage struct {
+	Base64      string
+	ContentType string
+}
+
+func qrcodeImageFromFile(path string) qrcodeImage {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return qrcodeImage{}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("读取二维码图片失败: path=%s err=%v", path, err)
+		return qrcodeImage{}
+	}
+	return qrcodeImage{
+		Base64:      base64.StdEncoding.EncodeToString(data),
+		ContentType: qrcodeImageContentType(path),
+	}
+}
+
+func qrcodeImageContentType(path string) string {
+	switch strings.ToLower(filepath.Ext(strings.TrimSpace(path))) {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	default:
+		return DefaultQRCodeImageType
+	}
+}
+
 func (m CardMessage) toTemplateVariable() map[string]any {
 	return map[string]any{
 		"app_name":          m.AppName,
@@ -519,42 +597,155 @@ func (s SigninCardState) normalize() SigninCardState {
 	return s
 }
 
-func buildRightSigninContent(state SigninCardState) string {
+func buildRightSigninContent(status RightSigninStatus, state SigninCardState) string {
 	lines := []string{
-		fmt.Sprintf("**运行ID**：%s", state.RunID),
-		fmt.Sprintf("**阶段**：%s", state.Stage),
+		fmt.Sprintf("%s **状态**：%s", rightSigninStatusEmoji(status, state.Status), rightSigninStatusText(status, state.Status)),
 	}
 	if state.DryRun {
-		lines = append(lines, "**运行模式**：dry-run")
-	}
-	if state.Status != "-" {
-		lines = append(lines, fmt.Sprintf("**当前状态**：%s", state.Status))
+		lines = append(lines, "🧪 **模式**：`dry-run`")
 	}
 	if state.Message != "" {
-		lines = append(lines, fmt.Sprintf("**说明**：%s", state.Message))
-	}
-	if state.CookieCount > 0 {
-		lines = append(lines, fmt.Sprintf("**已加载 Cookie**：%d 条", state.CookieCount))
-	}
-	if state.RefreshCount > 0 {
-		lines = append(lines, fmt.Sprintf("**二维码刷新次数**：%d", state.RefreshCount))
-	}
-	if state.QRCodeKind != "" {
-		lines = append(lines, fmt.Sprintf("**二维码类型**：%s", state.QRCodeKind))
+		lines = append(lines, fmt.Sprintf("%s **%s**：%s",
+			rightSigninMessageEmoji(status, state.Status),
+			rightSigninMessageLabel(status, state.Status),
+			truncateText(state.Message, 120),
+		))
 	}
 	if state.Duration > 0 {
-		lines = append(lines, fmt.Sprintf("**运行耗时**：%s", formatDuration(state.Duration)))
+		lines = append(lines, fmt.Sprintf("⏱️ **耗时**：%s", formatDuration(state.Duration)))
 	}
-	if state.CurrentURL != "" && state.CurrentURL != state.SiteURL {
-		lines = append(lines, fmt.Sprintf("**当前页面**：%s", truncateText(state.CurrentURL, 160)))
-	}
-	if state.ScreenshotPath != "" {
-		lines = append(lines, fmt.Sprintf("**截图留证**：`%s`", state.ScreenshotPath))
-	}
-	if state.HTMLPath != "" {
-		lines = append(lines, fmt.Sprintf("**HTML 留证**：`%s`", state.HTMLPath))
+	if isRightSigninProblem(status, state.Status) && (state.ScreenshotPath != "" || state.HTMLPath != "") {
+		lines = append(lines, "📎 **留证**：已保存截图/HTML，详见运行日志。")
 	}
 	return strings.Join(lines, "\n")
+}
+
+func rightSigninStatusText(status RightSigninStatus, raw string) string {
+	label := rightSigninStatusLabel(status, raw)
+	switch {
+	case isRightSigninFailure(status, raw):
+		return colorText("red", label)
+	case isRightSigninSuccess(raw):
+		return colorText("green", label)
+	default:
+		return colorText("grey", label)
+	}
+}
+
+func rightSigninStatusLabel(status RightSigninStatus, raw string) string {
+	switch raw {
+	case "success":
+		return "签到成功"
+	case "already_signed":
+		return "今日已签到"
+	case "dry_run":
+		return "dry-run 完成"
+	case "need_login":
+		return "等待扫码"
+	case "login_waiting_confirm":
+		return "等待确认"
+	case "risk_control":
+		return "检测到风控"
+	case "login_timeout":
+		return "登录超时"
+	case "qrcode_expired_too_many_times":
+		return "二维码刷新超限"
+	case "network_error":
+		return "网络异常"
+	case "page_changed":
+		return "页面状态变化"
+	case "failure", "failed":
+		return "执行失败"
+	case "ready_to_sign":
+		return "准备签到"
+	}
+	switch status {
+	case RightSigninStatusStarting:
+		return "任务已开始"
+	case RightSigninStatusChecking:
+		return "检查登录态"
+	case RightSigninStatusLoginRequired:
+		return "等待扫码"
+	case RightSigninStatusLoginWaiting:
+		return "等待确认"
+	case RightSigninStatusLoginSuccess:
+		return "登录成功"
+	case RightSigninStatusSigning:
+		return "正在签到"
+	case RightSigninStatusProgressWarning:
+		return "进度异常"
+	case RightSigninStatusFailed:
+		return "执行失败"
+	case RightSigninStatusFinished:
+		return "任务完成"
+	default:
+		if raw != "" && raw != "-" {
+			return raw
+		}
+		return "执行中"
+	}
+}
+
+func rightSigninStatusEmoji(status RightSigninStatus, raw string) string {
+	switch {
+	case isRightSigninFailure(status, raw):
+		return "🔴"
+	case isRightSigninSuccess(raw):
+		return "🟢"
+	case status == RightSigninStatusLoginRequired || status == RightSigninStatusLoginWaiting || raw == "need_login" || raw == "login_waiting_confirm":
+		return "📱"
+	default:
+		return "🟡"
+	}
+}
+
+func rightSigninMessageEmoji(status RightSigninStatus, raw string) string {
+	if isRightSigninProblem(status, raw) {
+		return "⚠️"
+	}
+	if isRightSigninSuccess(raw) {
+		return "✅"
+	}
+	return "💬"
+}
+
+func rightSigninMessageLabel(status RightSigninStatus, raw string) string {
+	if isRightSigninProblem(status, raw) {
+		return "异常"
+	}
+	if isRightSigninSuccess(raw) {
+		return "结果"
+	}
+	return "提示"
+}
+
+func isRightSigninProblem(status RightSigninStatus, raw string) bool {
+	return status == RightSigninStatusProgressWarning || isRightSigninFailure(status, raw)
+}
+
+func isRightSigninFailure(status RightSigninStatus, raw string) bool {
+	if status == RightSigninStatusFailed {
+		return true
+	}
+	switch raw {
+	case "risk_control", "login_timeout", "qrcode_expired_too_many_times", "network_error", "page_changed", "failure", "failed":
+		return true
+	default:
+		return false
+	}
+}
+
+func isRightSigninSuccess(raw string) bool {
+	switch raw {
+	case "success", "already_signed", "dry_run":
+		return true
+	default:
+		return false
+	}
+}
+
+func colorText(color, text string) string {
+	return fmt.Sprintf("<font color='%s'>%s</font>", color, text)
 }
 
 func resultTitle(state SigninCardState) string {

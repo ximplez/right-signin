@@ -238,17 +238,11 @@ func (r *Runner) captureAndNotify(ctx context.Context, sess *browser.Session, re
 func (r *Runner) updateCard(ctx context.Context, status notify.RightSigninStatus, state notify.SigninCardState) error {
 	cardNotifier, ok := r.notifier.(notify.CardNotifier)
 	if !ok {
+		card := notify.BuildRightSigninCard(status, state)
 		return r.notifier.Notify(ctx, notify.Message{
-			App:   r.cfg.AppName,
-			Title: titleForStatus(model.Status(state.Status)),
-			Msg: strings.Join([]string{
-				"运行ID: " + state.RunID,
-				"阶段: " + state.Stage,
-				"状态: " + state.Status,
-				"原因: " + state.Message,
-				optionalLine("二维码类型", state.QRCodeKind),
-				optionalLine("二维码刷新次数", fmt.Sprintf("%d", state.RefreshCount)),
-			}, "\n"),
+			App:       r.cfg.AppName,
+			Title:     firstNonEmpty(card.Title, titleForStatus(model.Status(state.Status))),
+			Msg:       card.Content,
 			TargetURL: chooseTarget(state.QRCodeURL, state.CurrentURL),
 		})
 	}
@@ -261,19 +255,20 @@ func (r *Runner) cardStateFromResult(result model.Result, stage string, duration
 		duration = time.Since(r.startedAt)
 	}
 	return notify.SigninCardState{
-		RunID:          r.cfg.RunID,
-		Stage:          stage,
-		Status:         string(result.Status),
-		Message:        result.Message,
-		SiteURL:        r.cfg.SignInURL,
-		CurrentURL:     result.URL,
-		QRCodeURL:      result.QRCodeURL,
-		QRCodeKind:     result.QRCodeKind,
-		ScreenshotPath: result.ScreenshotPath,
-		HTMLPath:       result.HTMLPath,
-		RefreshCount:   result.RefreshCount,
-		Duration:       duration,
-		DryRun:         r.cfg.DryRun,
+		RunID:           r.cfg.RunID,
+		Stage:           stage,
+		Status:          string(result.Status),
+		Message:         result.Message,
+		SiteURL:         r.cfg.SignInURL,
+		CurrentURL:      result.URL,
+		QRCodeURL:       result.QRCodeURL,
+		QRCodeKind:      result.QRCodeKind,
+		QRCodeImagePath: result.QRCodeFilePath,
+		ScreenshotPath:  result.ScreenshotPath,
+		HTMLPath:        result.HTMLPath,
+		RefreshCount:    result.RefreshCount,
+		Duration:        duration,
+		DryRun:          r.cfg.DryRun,
 	}
 }
 
@@ -296,13 +291,6 @@ func titleForStatus(status model.Status) string {
 	default:
 		return "签到失败"
 	}
-}
-
-func optionalLine(label, value string) string {
-	if value == "" {
-		return ""
-	}
-	return label + ": " + value
 }
 
 func chooseTarget(qrURL, url string) string {

@@ -94,13 +94,13 @@ func (s *QQAuthenticator) waitForQRCodeAndLogin(ctx context.Context, sess *brows
 		}
 		loggedIn, reason, err := s.IsLoggedIn(sess)
 		if err == nil && loggedIn {
-			return model.Result{Status: model.StatusSuccess, Message: "扫码登录成功: " + reason, QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseFile(qrInfo.ImagePath, qrInfo.PageShot), RefreshCount: refreshCount}, nil
+			return model.Result{Status: model.StatusSuccess, Message: "扫码登录成功: " + reason, QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseQRCodeImageFile(qrInfo), RefreshCount: refreshCount}, nil
 		}
 		if err != nil {
 			log.Printf("登录态轮询失败: %v", err)
 		}
 		if risk, reason, err := s.detectRisk(sess); err == nil && risk {
-			return model.Result{Status: model.StatusRiskControl, Message: reason, QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseFile(qrInfo.ImagePath, qrInfo.PageShot), RefreshCount: refreshCount}, nil
+			return model.Result{Status: model.StatusRiskControl, Message: reason, QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseQRCodeImageFile(qrInfo), RefreshCount: refreshCount}, nil
 		}
 		protocolResult, protocolErr := s.pollQQQRCodeProtocol(ctx, sess, qrInfo)
 		if protocolErr != nil {
@@ -123,10 +123,10 @@ func (s *QQAuthenticator) waitForQRCodeAndLogin(ctx context.Context, sess *brows
 				s.updateLoginProgress(ctx, notify.RightSigninStatusLoginWaiting, qrInfo, refreshCount, "二维码已被扫码，请在 QQ 客户端确认授权。")
 			case "65", "68":
 				if refreshCount >= maxRefreshCount {
-					return model.Result{Status: model.StatusQRCodeExpiredTooMany, Message: fmt.Sprintf("二维码协议层刷新次数超限: 已刷新 %d 次，最后状态=%s", refreshCount, protocolResult.Message), QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseFile(qrInfo.ImagePath, qrInfo.PageShot), RefreshCount: refreshCount}, nil
+					return model.Result{Status: model.StatusQRCodeExpiredTooMany, Message: fmt.Sprintf("二维码协议层刷新次数超限: 已刷新 %d 次，最后状态=%s", refreshCount, protocolResult.Message), QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseQRCodeImageFile(qrInfo), RefreshCount: refreshCount}, nil
 				}
 				if err := s.refreshQRCode(sess); err != nil {
-					return model.Result{Status: model.StatusFailure, Message: "协议层检测到二维码失效后刷新失败", QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseFile(qrInfo.ImagePath, qrInfo.PageShot), RefreshCount: refreshCount}, err
+					return model.Result{Status: model.StatusFailure, Message: "协议层检测到二维码失效后刷新失败", QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseQRCodeImageFile(qrInfo), RefreshCount: refreshCount}, err
 				}
 				refreshCount++
 				prevQRInfo := qrInfo
@@ -153,10 +153,10 @@ func (s *QQAuthenticator) waitForQRCodeAndLogin(ctx context.Context, sess *brows
 		}
 		if protocolErr != nil && s.cfg.QRCodeCheckInterval > 0 && !time.Now().Before(nextFallbackRefreshAt) {
 			if refreshCount >= maxRefreshCount {
-				return model.Result{Status: model.StatusQRCodeExpiredTooMany, Message: fmt.Sprintf("二维码轮询异常且刷新次数超限: 已刷新 %d 次", refreshCount), QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseFile(qrInfo.ImagePath, qrInfo.PageShot), RefreshCount: refreshCount}, nil
+				return model.Result{Status: model.StatusQRCodeExpiredTooMany, Message: fmt.Sprintf("二维码轮询异常且刷新次数超限: 已刷新 %d 次", refreshCount), QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseQRCodeImageFile(qrInfo), RefreshCount: refreshCount}, nil
 			}
 			if err := s.refreshQRCode(sess); err != nil {
-				return model.Result{Status: model.StatusFailure, Message: "协议层轮询异常后的兜底刷新失败", QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseFile(qrInfo.ImagePath, qrInfo.PageShot), RefreshCount: refreshCount}, err
+				return model.Result{Status: model.StatusFailure, Message: "协议层轮询异常后的兜底刷新失败", QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseQRCodeImageFile(qrInfo), RefreshCount: refreshCount}, err
 			}
 			refreshCount++
 			prevQRInfo := qrInfo
@@ -178,11 +178,11 @@ func (s *QQAuthenticator) waitForQRCodeAndLogin(ctx context.Context, sess *brows
 		}
 		select {
 		case <-ctx.Done():
-			return model.Result{Status: model.StatusLoginTimeout, Message: "上下文取消或超时", QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseFile(qrInfo.ImagePath, qrInfo.PageShot), RefreshCount: refreshCount}, ctx.Err()
+			return model.Result{Status: model.StatusLoginTimeout, Message: "上下文取消或超时", QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseQRCodeImageFile(qrInfo), RefreshCount: refreshCount}, ctx.Err()
 		case <-time.After(s.cfg.LoginPollInterval):
 		}
 	}
-	return model.Result{Status: model.StatusLoginTimeout, Message: "等待扫码登录超时", QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseFile(qrInfo.ImagePath, qrInfo.PageShot), RefreshCount: refreshCount}, nil
+	return model.Result{Status: model.StatusLoginTimeout, Message: "等待扫码登录超时", QRCodeURL: qrInfo.PreviewURL, QRCodeKind: qrInfo.Kind, QRCodeFilePath: chooseQRCodeImageFile(qrInfo), RefreshCount: refreshCount}, nil
 }
 
 func (s *QQAuthenticator) resumeQQOAuthIfNeeded(sess *browser.Session, qqAuthURL string, resumedAfterScan bool) (bool, error) {
